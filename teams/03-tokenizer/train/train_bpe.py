@@ -14,6 +14,12 @@ Id layout (from slots.json)
     ...                          one contiguous block per script, in slots.json order
     [vocab - special_slots, vocab)  special tokens: named ones, then <|reserved_N|>
 
+With --special-layout v0 the special ids are tokenizer v0's instead (#107):
+all 356 special entries are copied verbatim from the v0 tokenizer.json, at
+their exact ids (including the 9 outside the top block, e.g. 36 and 128512).
+Normal tokens then fill the remaining 130,716 ids in order, skipping those
+ids, so a script block may contain a special id; the manifest lists them.
+
 Method
 ------
 1. Base. Walk o200k_base in rank order. Keep a token only if it is <= 32 bytes,
@@ -24,7 +30,7 @@ Method
    with the base, and continue BPE training on those words for exactly `slots`
    merges. A merge is allowed only if the result is <= 32 bytes, spans one
    script, and is not already in the vocab.
-3. Specials fill the top `special_slots` ids.
+3. Specials fill the top `special_slots` ids, or v0's ids (--special-layout v0).
 
 Steps 1 and 2 enforce the four verify-script properties by construction:
 no cross-script merges, no normal token > 32 bytes. With --brahmic-dir the
@@ -36,6 +42,11 @@ vocab / merge / special deltas and does not fail on a difference.
 Usage
 -----
     python train_bpe.py --corpus /path/to/corpus --out /path/to/out \\
+        --brahmic-dir /path/to/BrahmicTokenizer-131K
+
+    # Same merges, but tokenizer v0's special ids (build v0 with v0/build_v0.py)
+    python train_bpe.py --corpus /path/to/corpus --out /path/to/out \\
+        --special-layout v0 --v0-tokenizer /path/to/v0_tokenizer.json \\
         --brahmic-dir /path/to/BrahmicTokenizer-131K
 
 Writes <out>/tokenizer.json and <out>/manifest.json (sha256, slot table,
@@ -159,13 +170,15 @@ def build_base(size):
 
 
 def tokenizer_json(vocab, merges, specials, pattern):
-    """vocab: unicode-string -> id; merges: [(a, b)] unicode strings; specials: [(id, content)]."""
+    """vocab: unicode-string -> id; merges: [(a, b)] unicode strings;
+    specials: [(id, content)] or full added_tokens entries (dicts, copied as-is)."""
     return {
         "version": "1.0",
         "truncation": None,
         "padding": None,
-        "added_tokens": [{"id": i, "content": c, "single_word": False, "lstrip": False, "rstrip": False,
-                          "normalized": False, "special": True} for i, c in specials],
+        "added_tokens": [s if isinstance(s, dict) else
+                         {"id": s[0], "content": s[1], "single_word": False, "lstrip": False, "rstrip": False,
+                          "normalized": False, "special": True} for s in specials],
         "normalizer": None,
         "pre_tokenizer": {"type": "Sequence", "pretokenizers": [
             {"type": "Split", "pattern": {"Regex": pattern}, "behavior": "Isolated", "invert": False},
@@ -281,6 +294,18 @@ def run_verify(brahmic_dir, tok_path, compare_to):
     return results
 
 
+def load_v0_specials(path):
+    """Tokenizer v0's added_tokens, after checking the file against v0/SHA256SUMS (#107)."""
+    sha = sha256_file(path)
+    sums = Path(__file__).resolve().parent.parent / "v0" / "SHA256SUMS"
+    if sums.exists():
+        want = [ln.split()[0] for ln in sums.read_text().splitlines() if ln.endswith("v0/tokenizer.json")]
+        if want and sha != want[0]:
+            sys.exit(f"ERROR: {path} sha256 {sha} is not tokenizer v0 ({want[0]}). Build it with v0/build_v0.py.")
+    t = json.loads(Path(path).read_text(encoding="utf-8"))
+    return t["added_tokens"], sha
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--corpus", required=True, help="directory with <lang>.txt from fetch_corpus.py")
@@ -288,6 +313,9 @@ def main():
     ap.add_argument("--slots", default=str(Path(__file__).with_name("slots.json")))
     ap.add_argument("--brahmic-dir", help="clone of BrahmicTokenizer-131K; runs its four verify scripts on the output")
     ap.add_argument("--compare-to", help="tokenizer.json for the structural diff (default: <brahmic-dir>/tokenizer.json)")
+    ap.add_argument("--special-layout", choices=["own", "v0"], default="own",
+                    help="own: specials in the top special_slots ids (slots.json); v0: tokenizer v0's exact special ids")
+    ap.add_argument("--v0-tokenizer", help="tokenizer v0 tokenizer.json (from v0/build_v0.py), for --special-layout v0")
     args = ap.parse_args()
 
     import tiktoken
@@ -300,9 +328,20 @@ def main():
 
     vocab_size, n_special = cfg["vocab_size"], cfg["special_slots"]
     scripts = cfg["scripts"]
-    base_size = vocab_size - n_special - sum(s["slots"] for s in scripts.values())
+    if args.special_layout == "v0":
+        if not args.v0_tokenizer:
+            sys.exit("ERROR: --special-layout v0 needs --v0-tokenizer.")
+        specials, v0_sha = load_v0_specials(args.v0_tokenizer)
+        n_special = len(specials)
+    else:
+        names = cfg["named_specials"] + [f"<|reserved_{i}|>" for i in range(n_special - len(cfg["named_specials"]))]
+        specials = [(vocab_size - n_special + i, c) for i, c in enumerate(names)]
+    special_ids = {s["id"] if isinstance(s, dict) else s[0] for s in specials}
+    # The build works on dense ids 0..n_normal-1; real_id maps them past the special ids.
+    real_id = [i for i in range(vocab_size) if i not in special_ids]
+    base_size = len(real_id) - sum(s["slots"] for s in scripts.values())
     print(f"layout: base={base_size}  scripts={sum(s['slots'] for s in scripts.values())}  "
-          f"specials={n_special}  total={vocab_size}", flush=True)
+          f"specials={n_special} ({args.special_layout})  total={vocab_size}", flush=True)
 
     t0 = time.time()
     base_vocab, base_merges, dropped = build_base(base_size)
@@ -319,7 +358,13 @@ def main():
     id_bytes = {i: b for b, i in base_vocab.items()}
     vocab_bytes = set(base_vocab)
     all_merges = [(base_vocab[a], base_vocab[b]) for a, b in base_merges]
-    layout = {"base": [0, base_size]}
+    def block(lo, hi):
+        """Real id range of dense ids [lo, hi), plus any special ids that fall inside it."""
+        b = [real_id[lo], real_id[hi - 1] + 1]
+        inside = sorted(i for i in special_ids if b[0] <= i < b[1])
+        return b + [{"special_ids_inside": inside}] if inside else b
+
+    layout = {"base": block(0, base_size)}
     corpus_manifest_path = corpus / "corpus_manifest.json"
     corpus_manifest = json.loads(corpus_manifest_path.read_text()) if corpus_manifest_path.exists() else {}
     next_id = base_size
@@ -336,18 +381,26 @@ def main():
         freqs = [c for _, c in items]
         merges = learn_merges(words, freqs, id_bytes, vocab_bytes, script, spec["slots"], next_id)
         all_merges.extend((a, b) for a, b, _ in merges)
-        layout[script] = [next_id, next_id + spec["slots"]]
+        layout[script] = block(next_id, next_id + spec["slots"])
         print(f"{script}: {len(items)} unique words, {sum(freqs)} occurrences -> ids "
-              f"[{next_id}, {next_id + spec['slots']})  ({time.time() - t0:.0f}s)", flush=True)
+              f"[{layout[script][0]}, {layout[script][1]})  ({time.time() - t0:.0f}s)", flush=True)
         next_id += spec["slots"]
 
-    names = cfg["named_specials"] + [f"<|reserved_{i}|>" for i in range(n_special - len(cfg["named_specials"]))]
-    specials = [(next_id + i, c) for i, c in enumerate(names)]
-    layout["specials"] = [next_id, next_id + n_special]
-    assert next_id + n_special == vocab_size
+    assert next_id == len(real_id)
+    if args.special_layout == "v0":
+        top = vocab_size - sum(1 for i in special_ids if i >= real_id[-1])
+        layout["specials"] = {"from": "tokenizer v0", "count": n_special,
+                              "ids_outside_top_block": sorted(i for i in special_ids if i < top)}
+    else:
+        layout["specials"] = [next_id, next_id + n_special]
 
-    vocab = {to_unicode(b): i for i, b in id_bytes.items()}
-    vocab.update({c: i for i, c in specials})
+    vocab = {to_unicode(b): real_id[i] for i, b in id_bytes.items()}
+    for s in specials:
+        c, i = (s["content"], s["id"]) if isinstance(s, dict) else (s[1], s[0])
+        if c in vocab:
+            sys.exit(f"ERROR: special {c!r} is also a normal token string.")
+        vocab[c] = i
+    assert len(vocab) == vocab_size and sorted(vocab.values()) == list(range(vocab_size))
     merges_u = [(to_unicode(id_bytes[a]), to_unicode(id_bytes[b])) for a, b in all_merges]
     tok_path = out / "tokenizer.json"
     tok_path.write_text(json.dumps(tokenizer_json(vocab, merges_u, specials, pattern), ensure_ascii=False), encoding="utf-8")
@@ -371,8 +424,10 @@ def main():
         "merges": len(merges_u),
         "layout": layout,
         "slots": {s: v["slots"] for s, v in scripts.items()},
-        "special_tokens": names[:len(cfg["named_specials"])],
-        "reserved_special_slots": n_special - len(cfg["named_specials"]),
+        "special_layout": args.special_layout,
+        **({"special_tokens": names[:len(cfg["named_specials"])],
+            "reserved_special_slots": n_special - len(cfg["named_specials"])}
+           if args.special_layout == "own" else {"v0_tokenizer_sha256": v0_sha, "special_tokens": n_special}),
         "base": {"source": "tiktoken o200k_base", "kept": base_size, "dropped": dropped},
         "corpus": {lang: corpus_manifest.get(lang) for spec in scripts.values() for lang in spec["langs"]},
         "slots_json_sha256": sha256_file(args.slots),

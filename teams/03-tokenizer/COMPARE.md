@@ -21,6 +21,7 @@ Tokenizer v0 (`v0/`, #107) only renames reserved special slots, so it encodes pl
 | Sarvam-m | sarvamai/sarvam-m | 1.2672 | 1.9405 | 2.9155 | 3.5911 | 3.7030 | 3.8345 | 4.7443 | 3.1445 | 3.6214 | 3.1976 | 18.1782 | 4.7235 | 4.8722 |
 | Sarvam-1 | sarvamai/sarvam-1 | 1.4313 | 1.4039 | 2.0467 | 2.1554 | 2.1321 | 2.4001 | 2.8345 | 1.7765 | 1.8024 | 1.6826 | 2.3251 | 4.7451 | 2.3004 |
 | c0 (`train/train_bpe.py`) | not published | 1.2596 | 1.6310 | 2.2673 | 2.6597 | 2.5954 | 2.7836 | 3.0869 | 2.1067 | 2.1193 | 2.0053 | 2.6162 | 2.3402 | 2.3829 |
+| c0-v0ids (`--special-layout v0`) | not published | 1.2596 | 1.6311 | 2.2675 | 2.6597 | 2.5955 | 2.7836 | 3.0869 | 2.1067 | 2.1194 | 2.0053 | 2.6162 | 2.3405 | 2.3829 |
 
 ## Code and math (tokens / char, lower is better)
 
@@ -36,6 +37,7 @@ Tokenizer v0 (`v0/`, #107) only renames reserved special slots, so it encodes pl
 | Sarvam-m | 0.3073 | 0.3378 | 0.3508 |
 | Sarvam-1 | 0.3780 | 0.4240 | 0.3805 |
 | c0 (`train/train_bpe.py`) | 0.2979 | 0.3226 | 0.3038 |
+| c0-v0ids (`--special-layout v0`) | 0.2979 | 0.3226 | 0.3038 |
 
 ## Cross-checks against the paper's reference outputs
 
@@ -72,3 +74,13 @@ python harness/run_harness.py --tokenizers BrahmicTokenizer-131K --candidate c0=
 
 The build is deterministic: two runs gave the same sha256. Layout, corpus hashes and verify results are in `train/c0_manifest.json`.
 The tokenizer.json (5,674,537 bytes) is not committed because pr-guard rejects files over 5 MiB (5,242,880 bytes).
+
+## c0-v0ids: c0 with tokenizer v0's special ids
+
+`train_bpe.py --special-layout v0 --v0-tokenizer <v0 tokenizer.json>` keeps all 356 v0 special tokens (#107) at their exact ids and strings. This includes the 9 at scattered ids (36, 128512, 128601, 129279, 129411, 129994, 130173, 130174, 130226) and the g10/lang/ctrl slot blocks.
+
+- Normal tokens fill the other 130,716 ids, so the o200k base has 100 fewer tokens than c0. The pass-bar numbers do not change, and no column moves by more than 0.0003.
+- The build checks the v0 file against `v0/SHA256SUMS`.
+- Its added tokens match v0 entry for entry, and a chat-formatted sample gives the same special-token ids as v0.
+- Three verify scripts PASS. The structural diff against v0 reports `added identical: True`.
+- sha256 `7e9bb94cb43e2395b9b250d1c64500a6f66da020aba136b9147f0590bfd5839d`. The layout is in `train/c0_v0ids_manifest.json`; 4 v0 special ids fall inside the Gurmukhi block.
