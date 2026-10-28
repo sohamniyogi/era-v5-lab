@@ -28,7 +28,10 @@ Method
 
 Steps 1 and 2 enforce the four verify-script properties by construction:
 no cross-script merges, no normal token > 32 bytes. With --brahmic-dir the
-script runs the four verify scripts on the output as a final gate.
+script runs the four verify scripts on the output as a final gate. The
+structural-identity script compares the output with --compare-to (default:
+the BrahmicTokenizer-131K tokenizer.json), not with itself; it reports the
+vocab / merge / special deltas and does not fail on a difference.
 
 Usage
 -----
@@ -253,13 +256,13 @@ def learn_merges(words, freqs, id_bytes, vocab_bytes, script, n_merges, first_id
     return merges
 
 
-def run_verify(brahmic_dir, tok_path):
-    """Run the four reviewer scripts exactly as the BrahmicTokenizer-131K smoke test does."""
+def run_verify(brahmic_dir, tok_path, compare_to):
+    """Run the four reviewer scripts; the structural diff is against `compare_to`, not the output itself."""
     cmds = [
         ["verify_no_cross_script_merges.py", tok_path],
         ["verify_max_byte_length.py", tok_path],
         ["verify_kronecker_constraints_unified.py", tok_path],
-        ["verify_sarvam_m_structural_identity.py", tok_path, tok_path],
+        ["verify_sarvam_m_structural_identity.py", tok_path, compare_to],
     ]
     results = {}
     for cmd in cmds:
@@ -269,8 +272,10 @@ def run_verify(brahmic_dir, tok_path):
         # verify_kronecker exits 0 even on a failed constraint, so read its RESULT line too.
         ok = p.returncode == 0 and "RESULT: FAIL" not in out and "FAIL:" not in out
         results[cmd[0]] = {"exit": p.returncode, "pass": ok,
-                           "summary": [ln for ln in out.splitlines() if "PASS" in ln or "FAIL" in ln or "RESULT" in ln]}
-        print(f"  {cmd[0]:<42} exit={p.returncode}  {'PASS' if ok else 'FAIL'}", flush=True)
+                           "summary": [ln.strip() for ln in out.splitlines()
+                                       if any(k in ln for k in ("PASS", "FAIL", "RESULT", " identical:"))]}
+        label = "REPORTED" if ok and cmd[0].startswith("verify_sarvam") else ("PASS" if ok else "FAIL")
+        print(f"  {cmd[0]:<42} exit={p.returncode}  {label}", flush=True)
         if not ok:
             print(out[-2000:], flush=True)
     return results
@@ -282,6 +287,7 @@ def main():
     ap.add_argument("--out", required=True, help="output directory (outside the repo; tokenizer.json > 5 MB)")
     ap.add_argument("--slots", default=str(Path(__file__).with_name("slots.json")))
     ap.add_argument("--brahmic-dir", help="clone of BrahmicTokenizer-131K; runs its four verify scripts on the output")
+    ap.add_argument("--compare-to", help="tokenizer.json for the structural diff (default: <brahmic-dir>/tokenizer.json)")
     args = ap.parse_args()
 
     import tiktoken
@@ -377,7 +383,9 @@ def main():
     ok = True
     if args.brahmic_dir:
         print("verify scripts:", flush=True)
-        manifest["verify"] = run_verify(args.brahmic_dir, tok_path)
+        compare_to = args.compare_to or str(Path(args.brahmic_dir) / "tokenizer.json")
+        manifest["verify"] = run_verify(args.brahmic_dir, tok_path, compare_to)
+        manifest["structural_diff_against"] = args.compare_to or "BrahmicTokenizer-131K/tokenizer.json"
         ok = all(v["pass"] for v in manifest["verify"].values())
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
     print(f"wrote {out / 'manifest.json'}  ({manifest['build_seconds']}s)")

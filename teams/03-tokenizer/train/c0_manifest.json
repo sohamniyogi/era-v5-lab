@@ -167,7 +167,7 @@
     }
   },
   "slots_json_sha256": "bffb8e267f53d71781062591493aa5b84efec4c9ff9fb13509ca4a291902457b",
-  "build_seconds": 66,
+  "build_seconds": 71,
   "verify": {
     "verify_no_cross_script_merges.py": {
       "exit": 0,
@@ -187,8 +187,8 @@
       "exit": 0,
       "pass": true,
       "summary": [
-        "  max byte ≤ 32:        PASS",
-        "  0 cross-script:       PASS",
+        "max byte ≤ 32:        PASS",
+        "0 cross-script:       PASS",
         "RESULT: PASS — tokenizer satisfies both Kronecker constraints at POS_DIM=32."
       ]
     },
@@ -196,8 +196,14 @@
       "exit": 0,
       "pass": true,
       "summary": [
-        "RESULT: STRUCTURALLY IDENTICAL — vocab, BPE table (content + rank), and added tokens all match."
+        "identical:        96,066",
+        "identical:        254",
+        "vocab identical:   False",
+        "merges identical:  False (rank order: False)",
+        "added identical:   False",
+        "RESULT: BPE TABLES DIFFER — 35,255 merges only in A, 206,093 only in B, rank-order match = False."
       ]
     }
-  }
+  },
+  "structural_diff_against": "BrahmicTokenizer-131K/tokenizer.json"
 }
