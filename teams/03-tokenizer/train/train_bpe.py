@@ -49,6 +49,11 @@ Usage
         --special-layout v0 --v0-tokenizer /path/to/v0_tokenizer.json \\
         --brahmic-dir /path/to/BrahmicTokenizer-131K
 
+    # v1 retrain (#128): v0 ids, #134 normalizer applied before counting words
+    python train_bpe.py --corpus /path/to/corpus --out /path/to/out --slots slots_v1.json \\
+        --special-layout v0 --v0-tokenizer /path/to/v0_tokenizer.json --normalizer v1 \\
+        --brahmic-dir /path/to/BrahmicTokenizer-131K
+
 Writes <out>/tokenizer.json and <out>/manifest.json (sha256, slot table,
 corpus hashes, verify results). Exit 1 if a verify script fails.
 """
@@ -169,7 +174,7 @@ def build_base(size):
     return vocab, merges, dict(dropped)
 
 
-def tokenizer_json(vocab, merges, specials, pattern):
+def tokenizer_json(vocab, merges, specials, pattern, normalizer=None):
     """vocab: unicode-string -> id; merges: [(a, b)] unicode strings;
     specials: [(id, content)] or full added_tokens entries (dicts, copied as-is)."""
     return {
@@ -179,7 +184,7 @@ def tokenizer_json(vocab, merges, specials, pattern):
         "added_tokens": [s if isinstance(s, dict) else
                          {"id": s[0], "content": s[1], "single_word": False, "lstrip": False, "rstrip": False,
                           "normalized": False, "special": True} for s in specials],
-        "normalizer": None,
+        "normalizer": normalizer,
         "pre_tokenizer": {"type": "Sequence", "pretokenizers": [
             {"type": "Split", "pattern": {"Regex": pattern}, "behavior": "Isolated", "invert": False},
             {"type": "ByteLevel", "add_prefix_space": False, "trim_offsets": True, "use_regex": False}]},
@@ -191,7 +196,23 @@ def tokenizer_json(vocab, merges, specials, pattern):
     }
 
 
-def word_counts(paths, script, pattern):
+def load_normalizer(name):
+    """The v1 normalizer from #134 (NFC + atomic chillu + Bn/Pa nukta re-join), or None."""
+    if name == "none":
+        return None
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "v1"))
+    from normalizer_experiment_v2 import VARIANTS
+    return VARIANTS["nfc+chillu+nukta-BnPa"]
+
+
+def normalizer_json(norm):
+    from tokenizers import Tokenizer, models
+    t = Tokenizer(models.BPE())
+    t.normalizer = norm
+    return json.loads(t.to_str())["normalizer"]
+
+
+def word_counts(paths, script, pattern, norm=None):
     """Pre-token byte strings from the corpus whose non-Common characters are all in `script`."""
     from tokenizers import Regex, pre_tokenizers
     split = pre_tokenizers.Split(Regex(pattern), behavior="isolated")
@@ -199,6 +220,8 @@ def word_counts(paths, script, pattern):
     for p in paths:
         with open(p, encoding="utf-8") as f:
             for line in f:
+                if norm is not None:
+                    line = norm.normalize_str(line)  # count words as the tokenizer will see them
                 counts.update(piece for piece, _ in split.pre_tokenize_str(line))
     keep = Counter()
     for piece, c in counts.items():
@@ -235,7 +258,7 @@ def learn_merges(words, freqs, id_bytes, vocab_bytes, script, n_merges, first_id
         next_id += 1
         id_bytes[nid] = new
         vocab_bytes.add(new)
-        merges.append((a, b, nid))
+        merges.append((a, b, nid, -negc))           # count = corpus frequency when merged
         touched = set()
         for wi in pair_words.pop((a, b)):
             w = words[wi]
@@ -314,6 +337,9 @@ def main():
     ap.add_argument("--slots", default=str(Path(__file__).with_name("slots.json")))
     ap.add_argument("--brahmic-dir", help="clone of BrahmicTokenizer-131K; runs its four verify scripts on the output")
     ap.add_argument("--compare-to", help="tokenizer.json for the structural diff (default: <brahmic-dir>/tokenizer.json)")
+    ap.add_argument("--normalizer", choices=["none", "v1"], default="none",
+                    help="v1: #134 normalizer (v1/normalizer_experiment_v2.py, nfc+chillu+nukta-BnPa), "
+                         "applied before counting words and written into tokenizer.json")
     ap.add_argument("--special-layout", choices=["own", "v0"], default="own",
                     help="own: specials in the top special_slots ids (slots.json); v0: tokenizer v0's exact special ids")
     ap.add_argument("--v0-tokenizer", help="tokenizer v0 tokenizer.json (from v0/build_v0.py), for --special-layout v0")
@@ -326,6 +352,7 @@ def main():
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     pattern = tiktoken.get_encoding("o200k_base")._pat_str
+    norm = load_normalizer(args.normalizer)
 
     vocab_size, n_special = cfg["vocab_size"], cfg["special_slots"]
     scripts = cfg["scripts"]
@@ -366,6 +393,7 @@ def main():
         return b + [{"special_ids_inside": inside}] if inside else b
 
     layout = {"base": block(0, base_size)}
+    last_count = {}
     corpus_manifest_path = corpus / "corpus_manifest.json"
     corpus_manifest = json.loads(corpus_manifest_path.read_text()) if corpus_manifest_path.exists() else {}
     next_id = base_size
@@ -375,13 +403,14 @@ def main():
         missing = [str(p) for p in paths if not p.exists()]
         if missing:
             sys.exit(f"ERROR: missing corpus files {missing}. Run fetch_corpus.py first.")
-        counts = word_counts(paths, script, pattern)
+        counts = word_counts(paths, script, pattern, norm)
         items = sorted(counts.items())                      # fixed order -> deterministic ties
         encs = base_tok.encode_batch([b.decode("utf-8") for b, _ in items], add_special_tokens=False)
         words = [e.ids for e in encs]
         freqs = [c for _, c in items]
         merges = learn_merges(words, freqs, id_bytes, vocab_bytes, script, spec["slots"], next_id)
-        all_merges.extend((a, b) for a, b, _ in merges)
+        all_merges.extend((a, b) for a, b, *_ in merges)
+        last_count[script] = {"last_merge_count": merges[-1][3], "words": sum(freqs)}
         layout[script] = block(next_id, next_id + spec["slots"])
         print(f"{script}: {len(items)} unique words, {sum(freqs)} occurrences -> ids "
               f"[{layout[script][0]}, {layout[script][1]})  ({time.time() - t0:.0f}s)", flush=True)
@@ -404,7 +433,8 @@ def main():
     assert len(vocab) == vocab_size and sorted(vocab.values()) == list(range(vocab_size))
     merges_u = [(to_unicode(id_bytes[a]), to_unicode(id_bytes[b])) for a, b in all_merges]
     tok_path = out / "tokenizer.json"
-    tok_path.write_text(json.dumps(tokenizer_json(vocab, merges_u, specials, pattern), ensure_ascii=False), encoding="utf-8")
+    tok_json = tokenizer_json(vocab, merges_u, specials, pattern, normalizer_json(norm) if norm else None)
+    tok_path.write_text(json.dumps(tok_json, ensure_ascii=False), encoding="utf-8")
 
     # Load back through the real library and round-trip a mixed sample.
     tok = Tokenizer.from_file(str(tok_path))
@@ -413,7 +443,7 @@ def main():
         with open(corpus / f"{lang}.txt", encoding="utf-8") as f:
             sample.append(f.readline())
     for s in sample:
-        if tok.decode(tok.encode(s).ids) != s:
+        if tok.decode(tok.encode(s).ids) != (norm.normalize_str(s) if norm else s):
             sys.exit(f"ERROR: round-trip failed on {s[:60]!r}")
     assert tok.get_vocab_size() == vocab_size
 
@@ -431,7 +461,9 @@ def main():
            if args.special_layout == "own" else {"v0_tokenizer_sha256": v0_sha, "special_tokens": n_special}),
         "base": {"source": "tiktoken o200k_base", "kept": base_size, "dropped": dropped},
         "corpus": {lang: corpus_manifest.get(lang) for spec in scripts.values() for lang in spec["langs"]},
+        "normalizer": args.normalizer,
         "slots_json_sha256": sha256_file(args.slots),
+        "slot_saturation": last_count,
         "build_seconds": round(time.time() - t_start),
     }
     print(f"wrote {tok_path}  sha256={sha}", flush=True)
