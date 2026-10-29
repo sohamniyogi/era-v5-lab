@@ -298,10 +298,11 @@ def load_v0_specials(path):
     """Tokenizer v0's added_tokens, after checking the file against v0/SHA256SUMS (#107)."""
     sha = sha256_file(path)
     sums = Path(__file__).resolve().parent.parent / "v0" / "SHA256SUMS"
-    if sums.exists():
-        want = [ln.split()[0] for ln in sums.read_text().splitlines() if ln.endswith("v0/tokenizer.json")]
-        if want and sha != want[0]:
-            sys.exit(f"ERROR: {path} sha256 {sha} is not tokenizer v0 ({want[0]}). Build it with v0/build_v0.py.")
+    want = [ln.split()[0] for ln in sums.read_text().splitlines() if ln.endswith("v0/tokenizer.json")] if sums.exists() else []
+    if not want:
+        sys.exit(f"ERROR: no v0/tokenizer.json line in {sums}; cannot check the v0 file.")
+    if sha != want[0]:
+        sys.exit(f"ERROR: {path} sha256 {sha} is not tokenizer v0 ({want[0]}). Build it with v0/build_v0.py.")
     t = json.loads(Path(path).read_text(encoding="utf-8"))
     return t["added_tokens"], sha
 
