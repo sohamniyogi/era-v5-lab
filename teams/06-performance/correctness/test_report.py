@@ -78,7 +78,7 @@ def test_compare_applies_five_percent_gate_at_boundary(b_ms, expected):
     a, b = _pair()
     a["clean"]["step_ms"]["median"] = 100.0
     b["clean"]["step_ms"]["median"] = b_ms
-    rows, ok, problems = report.compare(a, b)
+    rows, ok, problems = report.compare(a, b, 5.0, 2, 0.0)
     assert problems == []
     assert ok is expected
     step = next(row for row in rows if row[0] == "step (clean)")
@@ -132,7 +132,7 @@ def test_render_flags_inner_pool_allocation_when_timer_count_is_zero():
 def test_baseline_md_renders_run_metadata_comparison_and_gate_verdict():
     a, b = _pair()
     b["meta"]["tag"] = "candidate"
-    rows, ok, problems = report.compare(a, b)
+    rows, ok, problems = report.compare(a, b, 5.0, 2, 0.0)
     md = report.baseline_md(a, b, rows, ok, problems)
     assert "# Baseline comparison — PASS" in md
     assert "**GPU:** EXAMPLE-GPU (vs EXAMPLE-GPU)" in md
