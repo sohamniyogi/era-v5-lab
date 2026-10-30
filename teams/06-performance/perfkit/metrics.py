@@ -12,7 +12,8 @@ The one place these numbers are computed: perfkit.bench calls it, and G8 gets th
     gpu_telemetry(device)          SM clock, temperature, power, throttle reasons from nvidia-smi (None off CUDA)
     telemetry_during(device, work) the same, sampled while work() keeps the GPU busy
     throttle_flags(tel)            slowdown reasons in a sample (power cap, thermal, ...), None if not reported
-    GpuSampler(device, on_sample=...) GPU samples during clean steps, streamed to JSONL and rolled up in run["system"]
+    GpuSampler(device, on_sample=...) streams per-GPU node samples during clean steps; run["system"] summarizes
+                                   only the GPU used by the benchmark process
 
 FLOPs per token (T = sequence length, L = layers, d = width, N_active from GPT.param_counts):
     model_flops_per_token = 6 * N_active + 12 * L * d * T      (PaLM; attention scores counted non-causal)
@@ -195,15 +196,27 @@ class GpuSampler:
             run_clean(...)
         run["system"] = s.summary()        # None off CUDA or without nvidia-smi
 
-    One nvidia-smi child process writes samples to a reader thread. Optional on_sample callbacks can stream
-    each sample to JSONL while training continues; no CUDA synchronization is introduced. summary() still
-    returns min / median / max / mean and slowdown aggregates for the per-run JSON.
+    One nvidia-smi child process queries all visible GPUs on this node and writes samples to a reader thread.
+    Optional on_sample callbacks can stream each GPU sample to JSONL while training continues; no CUDA
+    synchronization is introduced. summary() returns aggregates for the benchmark's selected device only.
     """
 
     def __init__(self, device, interval_ms: int = 1000, on_sample=None):
         self.device, self.interval_ms = device, interval_ms
         self.on_sample = on_sample
+        self.identity_fields = ["index", "name", "uuid", "pci.bus_id"]
         self.fields = list(SAMPLE_FIELDS)
+        self.target_index = None
+        self.target_pci_bus_id = None
+        if device.type == "cuda":
+            self.target_index = device.index if device.index is not None else torch.cuda.current_device()
+            try:
+                p = torch.cuda.get_device_properties(device)
+                dom, bus, dv = (getattr(p, f"pci_{k}_id", None) for k in ("domain", "bus", "device"))
+                if all(isinstance(v, int) for v in (dom, bus, dv)):
+                    self.target_pci_bus_id = f"{dom:08X}:{bus:02X}:{dv:02X}.0"
+            except (AssertionError, RuntimeError):
+                pass
         self.reason = None
         self.started = False
         self.rows = []
@@ -233,11 +246,12 @@ class GpuSampler:
     def __enter__(self):
         if self.device.type != "cuda" or shutil.which("nvidia-smi") is None:
             return self
-        sel = _smi_select(self.device)
         self.reason = next((f for f in REASON_FIELDS
-                            if _sh(["nvidia-smi", sel, f"--query-gpu={f}", "--format=csv,noheader"])), None)
-        query = self.fields + ([self.reason] if self.reason else [])
-        self._proc = subprocess.Popen(["nvidia-smi", sel, f"--query-gpu={','.join(query)}",
+                            if _sh(["nvidia-smi", f"--query-gpu={f}", "--format=csv,noheader"])), None)
+        query = self.identity_fields + self.fields + ([self.reason] if self.reason else [])
+        # Query all GPUs once per node. A single collector process can then provide distinct device samples
+        # without one nvidia-smi child per GPU or duplicate rows from every distributed rank.
+        self._proc = subprocess.Popen(["nvidia-smi", f"--query-gpu={','.join(query)}",
                                        "--format=csv,noheader,nounits", f"--loop-ms={self.interval_ms}"],
                                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
         self._reader = threading.Thread(target=self._read_samples, name="perfkit-gpu-sampler", daemon=True)
@@ -263,32 +277,45 @@ class GpuSampler:
         return False
 
     def parse_line(self, line: str) -> dict | None:
-        """One CSV line -> {field: float, reason field: int}; None for a line with the wrong number of values."""
-        query = self.fields + ([self.reason] if self.reason else [])
+        """One GPU CSV row -> identity and numeric fields; None for the wrong number of values."""
+        query = self.identity_fields + self.fields + ([self.reason] if self.reason else [])
         vals = [v.strip() for v in line.split(",")]
         if len(vals) != len(query):
             return None
         row = {}
         for f, v in zip(query, vals):
-            try:
-                row[f] = int(v, 16) if f == self.reason else float(v)
-            except ValueError:                        # [N/A], [Not Supported]
-                row[f] = None
+            if f in ("name", "uuid", "pci.bus_id"):
+                row[f] = None if v in ("[N/A]", "[Not Supported]") else v
+            else:
+                try:
+                    row[f] = int(v, 16) if f == self.reason else float(v)
+                except ValueError:                    # [N/A], [Not Supported]
+                    row[f] = None
         return row
+
+    def _selected_rows(self):
+        """Rows for the benchmark's CUDA device, preserving the original per-run summary scope."""
+        if self.target_pci_bus_id:
+            matched = [r for r in self.rows if r.get("pci.bus_id", "").upper() == self.target_pci_bus_id.upper()]
+            if matched:
+                return matched
+        return [r for r in self.rows if r.get("index") == self.target_index]
 
     def summary(self) -> dict | None:
         if not self.started:
             return None
         from perfkit.timer import stats
+        selected = self._selected_rows()
         out = {"source": f"nvidia-smi --loop-ms={self.interval_ms}", "interval_ms": self.interval_ms,
-               "during": "clean steps", "samples": len(self.rows), "metrics": {}}
+               "during": "clean steps", "samples": len(selected), "metrics": {},
+               "gpu": {"index": self.target_index, "pci_bus_id": self.target_pci_bus_id}}
         for f, key in SAMPLE_FIELDS.items():
-            vals = [r[f] for r in self.rows if r.get(f) is not None]
+            vals = [r[f] for r in selected if r.get(f) is not None]
             if vals:
                 st = stats(vals)
                 out["metrics"][key] = {k: st[k] for k in ("min", "median", "max", "mean")}
         if self.reason:
-            flagged = [f for r in self.rows if r.get(self.reason) is not None
+            flagged = [f for r in selected if r.get(self.reason) is not None
                        and (f := throttle_flags({"throttle_reasons": r[self.reason]}))]
             out["slowdown_samples"] = len(flagged)
             out["slowdown_reasons"] = sorted({n for names in flagged for n in names})

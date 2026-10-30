@@ -58,17 +58,26 @@ at all, `meta.commit` is taken from the `PERF_COMMIT` environment variable (or `
 
 ## System metrics (`run["system"]`, CUDA runs)
 
-`perfkit.metrics.GpuSampler` runs `nvidia-smi --loop-ms=1000` in a child process while the clean steps run
-(the steps that give step time, tokens/s and MFU), so the samples describe the same steps. Each metric has
-`min`, `median`, `max`, `mean` over the samples in the final JSON. The sampler also streams individual records
+`perfkit.metrics.GpuSampler` runs one `nvidia-smi --loop-ms=1000` child process per benchmark process while the
+clean steps run (the steps that give step time, tokens/s and MFU). It queries all GPUs visible on that node and
+emits a separate row for each GPU at each sample interval. The `system.metrics` min/median/max/mean aggregates
+in the final JSON remain scoped to the benchmark's selected GPU; `system.gpu` identifies it. The sampler also
+streams individual records
 to the run's `<tag>.jsonl` sidecar as they arrive. Each line is a JSON object with `schema_version`, `event`,
 UTC `timestamp`, `run_id`, `node_id`, `gpu` (`name`, local `index`, `uuid`, `pci_bus_id`), current clean `step`
 when available, raw `metrics`, and `slowdown_flags`. `mem_used_mib` remains in MiB for G8 to convert. Reading
 the JSONL does not synchronize CUDA; a separate thread consumes `nvidia-smi` output and flushes each event.
 By default each invocation gets a unique `run_id`; pass `--run-id <id>` to share an ID across coordinated G5/G6
-invocations. `--node-id` overrides the default node name (`G8_NODE_ID` or hostname). `--repeat` creates separate
-runs and therefore cannot be combined with an explicit shared run ID. The current harness samples the one GPU
-selected by that process; multi-GPU/multi-node training collection is not implemented yet.
+or multi-node invocations. `--node-id` overrides the default node name (`G8_NODE_ID` or hostname). For a
+multi-node run, start one benchmark collector on each node with the same run ID and a distinct node ID; each
+collector samples every GPU visible on its node. Use node-local output directories, or distinct `--tag` values
+when the output directory is shared, so each node writes its own JSON and JSONL sidecars. For example, on each
+node run `python -m perfkit.bench --run-id exp-42 --node-id node-a --tag exp-42-node-a ...` (change the node
+ID and tag on the other node). A single invocation therefore covers one node and all its visible GPUs; it does
+not launch or coordinate distributed training. The existing `torchrun` path in `perfkit.bench` is for the
+isolated communication measurement, not a distributed training benchmark. `--repeat` creates separate runs
+and therefore cannot be combined with an explicit shared run ID. The per-run `system` aggregates continue to
+describe the GPU selected for the benchmark; JSONL contains separate samples for every visible GPU.
 
 | Key | nvidia-smi field | Meaning |
 |---|---|---|

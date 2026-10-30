@@ -41,7 +41,7 @@ def test_gpu_sample_record_contains_g8_identity_and_raw_mib_metrics():
 
 
 def test_gpu_sampler_stream_callback_receives_sample_and_current_step():
-    lines = "95, 40, 1200, 1410, 1600, 300.0, 65, 0x0000000000000004\n"
+    lines = "1, Example GPU, GPU-example, 00000000:02:00.0, 95, 40, 1200, 1410, 1600, 300.0, 65, 0x0000000000000004\n"
     samples = []
     sampler = GpuSampler(torch.device("cpu"), on_sample=lambda row, step: samples.append((row, step)))
     sampler.reason = "clocks_event_reasons.active"
@@ -52,4 +52,22 @@ def test_gpu_sampler_stream_callback_receives_sample_and_current_step():
 
     assert len(samples) == 1 and samples[0][1] == 12
     assert samples[0][0]["memory.used"] == 1200
+    assert samples[0][0]["uuid"] == "GPU-example"
     assert samples[0][0][sampler.reason] == 4
+
+
+def test_gpu_sampler_streams_distinct_rows_for_multiple_gpus():
+    lines = (
+        "0, GPU A, GPU-a, 00000000:01:00.0, 95, 40, 1200, 1410, 1600, 300.0, 65, 0x0\n"
+        "1, GPU B, GPU-b, 00000000:02:00.0, 75, 30, 800, 1200, 1400, 200.0, 55, 0x0\n"
+    )
+    samples = []
+    sampler = GpuSampler(torch.device("cpu"), on_sample=lambda row, step: samples.append((row, step)))
+    sampler.reason = "clocks_event_reasons.active"
+    sampler._proc = SimpleNamespace(stdout=io.StringIO(lines))
+    sampler.set_step(8)
+
+    sampler._read_samples()
+
+    assert [row["uuid"] for row, _ in samples] == ["GPU-a", "GPU-b"]
+    assert [step for _, step in samples] == [8, 8]
