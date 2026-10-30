@@ -168,6 +168,36 @@ def test_run_metadata_records_the_tokenizer():
     assert meta["tokenizer"]["sha256"] == bench.TOKENIZER_SHA256
     assert meta["vocab_size"] == VOCAB and meta["lr_schedule"] == "constant"
     assert meta["batch_size"] == s.loader.B and meta["seq_len"] == s.loader.T
+    assert meta["run_id"] and meta["node_id"]
+    auto_ids = {meta["run_id"], bench.run_metadata(s, "configs/tiny_cpu.yaml", [], "t")["run_id"]}
+    assert len(auto_ids) == 2 and all(len(run_id) == 32 for run_id in auto_ids)
+
+
+def test_run_id_and_node_id_can_be_set_for_g8_handover():
+    s = bench.build(tiny_cfg(), torch.device("cpu"))
+    meta = bench.run_metadata(s, "configs/tiny_cpu.yaml", [], "t", run_id="shared-exp", node_id="node-a")
+    assert meta["run_id"] == "shared-exp"
+    assert meta["node_id"] == "node-a"
+    peer = bench.run_metadata(s, "configs/tiny_cpu.yaml", [], "peer", run_id="shared-exp", node_id="node-b")
+    assert peer["run_id"] == meta["run_id"] and peer["node_id"] != meta["node_id"]
+
+
+def test_memory_summary_names_the_gpu_and_unit():
+    record = bench.memory_with_identity(
+        {"peak_allocated_gb": 12.5, "peak_reserved_gb": 16.0},
+        {"gpu": "Example GPU", "gpu_index": 1, "gpu_uuid": "GPU-example",
+         "gpu_pci_bus_id": "00000000:02:00.0"},
+    )
+    assert record == {
+        "peak_allocated_gb": 12.5, "peak_reserved_gb": 16.0, "unit": "GiB",
+        "gpu": {"name": "Example GPU", "index": 1, "uuid": "GPU-example",
+                "pci_bus_id": "00000000:02:00.0"},
+    }
+    assert bench.memory_with_identity(None, {}) is None
+    identified = example_run()
+    assert validate_run(identified) == []
+    identified["memory"]["unit"] = "GB"
+    assert "memory.unit must be 'GiB'" in validate_run(identified)
 
 
 def _checked_run(**meta):
@@ -430,6 +460,12 @@ def test_parse_turns_flags_into_overrides():
     assert ov == ["run.batch_size=4", "bench.modes=[clean,layer]", "bench.level=3", "bench.steps=7", "bench.warmup=2"]
 
 
+def test_parse_accepts_g8_run_and_node_ids():
+    args, _ = bench.parse(["--config", "c.yaml", "--run-id", "shared-run", "--node-id", "worker-1"])
+    assert args.run_id == "shared-run"
+    assert args.node_id == "worker-1"
+
+
 def test_parse_accepts_overrides_on_both_sides_of_the_flags():
     _, ov = bench.parse(["--config", "c.yaml", "run.batch_size=4", "--steps", "7", "report.tol_pct=9"])
     assert ov == ["run.batch_size=4", "report.tol_pct=9", "bench.steps=7"]
@@ -460,6 +496,14 @@ def test_main_writes_a_complete_valid_run(first_run):
     run = first_run["run"]
     assert first_run["code"] == 0, "exit code 0 means validate_run found nothing missing"
     assert validate_run(run) == []
+    event_path = Path(run["meta"]["events_jsonl"])
+    assert event_path.exists()
+    events = [json.loads(line) for line in event_path.read_text().splitlines()]
+    steps = [event for event in events if event["event"] == "step_timing"]
+    assert [event["step"] for event in steps] == [1, 2, 3, 4]
+    assert all(event["node_id"] == run["meta"]["node_id"] and event["rank"] == 0 for event in steps)
+    assert all(event["data_ms"] >= 0 and event["raw_step_ms"] > 0 for event in steps)
+    assert [event["raw_step_ms"] for event in steps] == run["clean"]["raw_step_ms"]
     assert run["meta"]["vocab_size"] == VOCAB and run["meta"]["tokenizer"]["revision"] == bench.TOKENIZER_REVISION
     assert run["clean"]["step_ms"]["n"] == 4 and run["clean"]["step_ms"]["median"] > 0
     assert run["metrics"]["tokens_per_s"] > 0 and run["metrics"]["params_total"] >= run["metrics"]["params_active"]
@@ -550,6 +594,11 @@ def test_repeat_cmd_is_one_run_with_a_new_tag_against_the_first():
     assert "--against" not in bench.repeat_cmd(["--config", "c.yaml"], "x", None)       # the first run
 
 
+def test_repeat_rejects_a_shared_run_id():
+    with pytest.raises(SystemExit, match="--run-id is for one benchmark invocation"):
+        bench.main(["--config", str(TINY), "--run-id", "shared-exp", "--repeat", "2"])
+
+
 def test_repeat_runs_every_run_in_a_child_and_the_first_without_against(tmp_path, monkeypatch):
     calls = _in_process_repeats(monkeypatch)
     _run_main(tmp_path / "runs", "kids", "--modes", "clean", "--repeat", "2", "report.tol_pct=1000")
@@ -573,6 +622,9 @@ def test_repeat_writes_one_json_per_run_and_passes_when_they_agree(tmp_path, cap
     assert code == 0
     # <tag>.json is run 1; <tag>-run2.json is run 2, checked against run 1.
     assert sorted(p.name for p in (tmp_path / "runs").glob("*.json")) == ["rep-run2.json", "rep.json"]
+    first_run = json.loads((tmp_path / "runs" / "rep.json").read_text())
+    second_run = json.loads((tmp_path / "runs" / "rep-run2.json").read_text())
+    assert first_run["meta"]["run_id"] != second_run["meta"]["run_id"]
     out = capsys.readouterr().out
     assert "repeat: 2 runs against rep.json: PASS" in out
     assert validate_run(json.loads((tmp_path / "runs" / "rep-run2.json").read_text())) == []

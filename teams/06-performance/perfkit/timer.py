@@ -138,8 +138,10 @@ class StepTimer:
     def stop(self):
         if self._open is None:
             raise RuntimeError("StepTimer.stop() without start()")
-        self._pairs.append((self._open, self._mark()))
+        pair = (self._open, self._mark())
+        self._pairs.append(pair)
         self._open = None
+        return pair
 
     @contextmanager
     def step(self):
