@@ -30,9 +30,10 @@ from pathlib import Path
 import pytest
 import torch
 
-from models.config import load_config
+from models.config import load_config, model_config
 from models.ke1 import token_bytes_random
 from perfkit import bench
+from perfkit.report import compare_lines
 from perfkit.schema import example_run, validate_run
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -67,8 +68,14 @@ def fake_loader(monkeypatch, tmp_path):
     monkeypatch.setattr(bench, "CACHE", tmp_path / "cache")
 
 
+# The harness tests time a small model on random tokens, whatever base.yaml selects: KE1 (random byte table, so no
+# dependence on G4's 131072-row KE2 table) and MoE (its regions and the rule 3b comm check are what they test).
+# The model itself is tested in test_model.py on base.yaml.
+HARNESS = ["data.source=synthetic", f"model.vocab_size={VOCAB}", "model.embedding=ke1", "model.ffn=moe"]
+
+
 def tiny_cfg(*overrides):
-    return load_config(TINY, ["data.source=synthetic", f"model.vocab_size={VOCAB}", *overrides])
+    return load_config(TINY, [*HARNESS, *overrides])
 
 
 # ------------------------------------------------------------------------------ build
@@ -102,26 +109,46 @@ def test_choose_dtype_fallbacks(monkeypatch):
         bench.choose_dtype("fp8", torch.device("cpu"), [])
 
 
-def test_batch_size_auto_follows_the_gpu(monkeypatch):
-    notes = []
-    monkeypatch.setattr(bench, "native_bf16", lambda: True)                        # A100 / L4 / H100
-    assert bench.resolve_batch("auto", torch.device("cuda"), notes) == 32 and "B=32" in notes[0]
-    monkeypatch.setattr(bench, "native_bf16", lambda: False)                       # T4: B=32 does not fit
-    assert bench.resolve_batch("auto", torch.device("cuda")) == 8
-    assert bench.resolve_batch("auto", torch.device("cpu")) == 8
-    assert bench.resolve_batch(16, torch.device("cuda")) == 16                     # a number is kept
-    assert load_config(ROOT / "configs" / "base.yaml")["run"]["batch_size"] == "auto"
+def test_batch_size_comes_from_the_config_only(monkeypatch):
+    for native in (True, False):                                                   # A100 or T4: same B
+        monkeypatch.setattr(bench, "native_bf16", lambda: native)
+        assert bench.resolve_batch(16) == 16
+    for bad in ("auto", 0, -1, 2.5, True, None):
+        with pytest.raises(SystemExit, match="run.batch_size"):
+            bench.resolve_batch(bad)
 
 
-def test_build_writes_the_resolved_batch_back():
-    s = bench.build(tiny_cfg("run.batch_size=auto"), torch.device("cpu"))
-    assert s.cfg["run"]["batch_size"] == 8 == s.loader.B
-    assert any("run.batch_size=auto" in n for n in s.notes)
+def test_build_uses_the_config_batch():
+    s = bench.build(tiny_cfg("run.batch_size=3"), torch.device("cpu"))
+    assert s.cfg["run"]["batch_size"] == 3 == s.loader.B
 
 
-def test_default_modes_measure_checkpoint_and_comm():
+def test_bench_constants_are_config_keys():
     b = load_config(ROOT / "configs" / "base.yaml")["bench"]
-    assert {"clean", "layer", "checkpoint", "comm"} <= set(b["modes"]) and b["steps"] >= 150
+    assert {"layer_warmup", "comm_reps", "peak_tflops", "ckpt_repeats", "trace_steps"} <= set(b)
+    a, ov = bench.parse(["--config", "x.yaml", "--peak-tflops", "100"])
+    assert "bench.peak_tflops=100.0" in ov
+
+
+def test_default_config_is_base_yaml():
+    a, _ = bench.parse([])
+    assert Path(a.config) == ROOT / "configs" / "base.yaml"
+
+
+def test_config_is_strict(tmp_path):
+    """The YAML is the only source: a duplicate key, an override of a key that does not exist, or a model
+    field missing from the YAML is an error, never a silent default."""
+    dup = tmp_path / "dup.yaml"
+    dup.write_text("inherit: " + str(ROOT / "configs" / "base.yaml") + "\nrun: {batch_size: 8, batch_size: 16}\n")
+    with pytest.raises(ValueError, match="duplicate key 'batch_size'"):
+        load_config(dup)
+    for typo in ("run.batchsize=16", "runn.batch_size=16"):
+        with pytest.raises(KeyError, match="has no"):
+            load_config(ROOT / "configs" / "base.yaml", [typo])
+    cfg = load_config(ROOT / "configs" / "base.yaml")
+    del cfg["model"]["block_size"]
+    with pytest.raises(KeyError, match="block_size"):
+        model_config(cfg)
 
 
 def test_pick_device_cpu_and_missing_cuda(monkeypatch):
@@ -152,7 +179,8 @@ def _checked_run(**meta):
 
 
 def _cfg(level=3, ffn="moe"):
-    return {"bench": {"level": level}, "run": {}, "model": {"ffn": ffn}, "report": {"gate_level": 2}}
+    return {"bench": {"level": level}, "run": {"compile": False}, "model": {"ffn": ffn}, "report": {"gate_level": 2, "tol_pct": 5.0, "abs_tol_ms": 0.05,
+                                                                                  "min_compare_steps": 100}}
 
 
 def test_rule_checks_clean_run_has_no_warnings():
@@ -222,7 +250,7 @@ def _two_runs():
 
 def test_quick_compare_identical_runs_pass():
     a, b = _two_runs()
-    rows, ok, problems = bench.quick_compare(a, b, 5.0, 2)
+    rows, ok, problems = bench.quick_compare(a, b, 5.0, 2, 0.0)
     assert ok and not problems
     names = [r[0] for r in rows]
     assert "step (clean)" in names and "fwd:block0" in names
@@ -233,7 +261,7 @@ def test_quick_compare_allows_muon_implementation_variant():
     a, b = _two_runs()
     a["config"]["optim"]["muon_impl"] = "loop"
     b["config"]["optim"]["muon_impl"] = "batched"
-    rows, ok, problems = bench.quick_compare(a, b, 5.0, 2)
+    rows, ok, problems = bench.quick_compare(a, b, 5.0, 2, 0.0)
     assert ok and not problems
     assert "step (clean)" in [row[0] for row in rows]
 
@@ -242,7 +270,7 @@ def test_quick_compare_allows_moe_dispatch_variant():
     a, b = _two_runs()
     a["config"]["model"]["moe"] = {"dispatch": "loop", "num_experts": 8}
     b["config"]["model"]["moe"] = {"dispatch": "sorted", "num_experts": 8}
-    rows, ok, problems = bench.quick_compare(a, b, 5.0, 2)
+    rows, ok, problems = bench.quick_compare(a, b, 5.0, 2, 0.0)
     assert ok and not problems
     assert "step (clean)" in [row[0] for row in rows]
 
@@ -252,56 +280,71 @@ def test_quick_compare_only_gates_levels_up_to_gate_level():
     level3 = [n for n, r in a["layer"]["regions"].items() if r["level"] == 3]
     assert level3, "the example run must have a level-3 part"
     b["layer"]["regions"][level3[0]]["median"] *= 3          # inside a block: reported, not gated
-    rows, ok, _ = bench.quick_compare(a, b, 5.0, 2)
+    rows, ok, _ = bench.quick_compare(a, b, 5.0, 2, 0.0)
     assert ok and level3[0] not in [r[0] for r in rows]
 
 
 def test_quick_compare_fails_a_part_that_moved_more_than_tol():
     a, b = _two_runs()
     b["layer"]["regions"]["fwd:block1"]["median"] *= 1.10    # a whole block 10% slower
-    rows, ok, _ = bench.quick_compare(a, b, 5.0, 2)
+    rows, ok, _ = bench.quick_compare(a, b, 5.0, 2, 0.0)
     verdict = {r[0]: r[4] for r in rows}
     assert not ok and verdict["fwd:block1"] == "FAIL" and verdict["fwd:block0"] == "ok"
-    assert bench.quick_compare(a, b, 12.0, 2)[1]             # a looser tolerance lets it through
+    assert bench.quick_compare(a, b, 12.0, 2, 0.0)[1]             # a looser tolerance lets it through
 
 
 def test_quick_compare_5_percent_boundary():
     a, b = _two_runs()
     b["clean"]["step_ms"]["median"] = a["clean"]["step_ms"]["median"] * 1.049
-    assert bench.quick_compare(a, b, 5.0, 2)[1]
+    assert bench.quick_compare(a, b, 5.0, 2, 0.0)[1]
     b["clean"]["step_ms"]["median"] = a["clean"]["step_ms"]["median"] * 1.06
-    assert not bench.quick_compare(a, b, 5.0, 2)[1]
+    assert not bench.quick_compare(a, b, 5.0, 2, 0.0)[1]
+
+
+def test_quick_compare_small_part_passes_under_abs_tol_ms():
+    """TSAI 30 Oct: a part passes within tol_pct OR less than abs_tol_ms apart; both run times are kept."""
+    a, b = _two_runs()
+    a["layer"]["regions"]["data"] = dict(b["layer"]["regions"]["fwd:embed"], median=0.031, level=1)
+    b["layer"]["regions"]["data"] = dict(b["layer"]["regions"]["fwd:embed"], median=0.035, level=1)
+    rows, ok, _ = bench.quick_compare(a, b, 5.0, 2, 0.05)                    # 12.9% apart, but 0.004 ms
+    row = next(r for r in rows if r[0] == "data")
+    assert ok and row[4] == "ok_abs" and (row[1], row[2]) == (0.031, 0.035) and row[3] > 5.0
+    assert not bench.quick_compare(a, b, 5.0, 2, 0.0)[1]                    # no floor: the 5% rule alone fails
+    b["layer"]["regions"]["data"]["median"] = 0.6                           # 0.569 ms apart: outside both
+    assert not bench.quick_compare(a, b, 5.0, 2, 0.05)[1]
+    lines = "\n".join(compare_lines(rows, ok, [], None, 5.0, 2, 0.05))
+    assert "ok (< 0.05 ms)" in lines and "0.031" in lines and "0.035" in lines and "0.004" in lines
 
 
 def test_quick_compare_refuses_different_gpu_and_vocab():
     a, b = _two_runs()
     b["meta"]["gpu"] = "OTHER-GPU"
     b["meta"]["vocab_size"] = 50304
-    rows, ok, problems = bench.quick_compare(a, b, 5.0, 2)
+    rows, ok, problems = bench.quick_compare(a, b, 5.0, 2, 0.0)
     assert not ok and any("gpu" in p for p in problems) and any("vocab_size" in p for p in problems)
 
 
 def test_quick_compare_missing_part_is_a_failure():
     a, b = _two_runs()
     del b["layer"]["regions"]["fwd:block0"]
-    rows, ok, _ = bench.quick_compare(a, b, 5.0, 2)
+    rows, ok, _ = bench.quick_compare(a, b, 5.0, 2, 0.0)
     assert not ok and {r[0]: r[4] for r in rows}["fwd:block0"] == "MISSING"
 
 
 def test_quick_compare_part_only_in_the_earlier_run_is_missing():
     a, b = _two_runs()
     del a["layer"]["regions"]["bwd:embed"]
-    rows, ok, _ = bench.quick_compare(a, b, 5.0, 2)
+    rows, ok, _ = bench.quick_compare(a, b, 5.0, 2, 0.0)
     assert not ok and {r[0]: r[4] for r in rows}["bwd:embed"] == "MISSING"
 
 
 def test_quick_compare_zero_ms_parts():
     a, b = _two_runs()
     a["layer"]["regions"]["opt:opt.adamw"]["median"] = b["layer"]["regions"]["opt:opt.adamw"]["median"] = 0.0
-    rows, ok, _ = bench.quick_compare(a, b, 5.0, 2)
+    rows, ok, _ = bench.quick_compare(a, b, 5.0, 2, 0.0)
     assert ok and {r[0]: r[4] for r in rows}["opt:opt.adamw"] == "ok"        # both 0 ms: they agree
     b["layer"]["regions"]["opt:opt.adamw"]["median"] = 0.3
-    rows, ok, _ = bench.quick_compare(a, b, 5.0, 2)
+    rows, ok, _ = bench.quick_compare(a, b, 5.0, 2, 0.0)
     assert not ok and {r[0]: r[4] for r in rows}["opt:opt.adamw"] == "FAIL"
 
 
@@ -311,7 +354,7 @@ def test_quick_compare_zero_ms_parts():
 def test_quick_compare_refuses_runs_that_do_different_work(section, key, value):
     a, b = _two_runs()
     b["config"].setdefault(section, {})[key] = value
-    _, ok, problems = bench.quick_compare(a, b, 5.0, 2)
+    _, ok, problems = bench.quick_compare(a, b, 5.0, 2, 0.0)
     assert not ok and any(section in p for p in problems)
 
 
@@ -320,7 +363,7 @@ def test_quick_compare_includes_checkpoint_and_all_to_all_when_both_have_them():
     for r, ms in ((a, 100.0), (b, 130.0)):
         r["checkpoint"] = {"save_ms": {"median": ms}}
         r["comm"] = {"moe_a2a": {"measured": True, "per_step_ms": ms / 10}}
-    rows, ok, _ = bench.quick_compare(a, b, 5.0, 2)
+    rows, ok, _ = bench.quick_compare(a, b, 5.0, 2, 0.0)
     verdict = {r[0]: r[4] for r in rows}
     assert verdict["checkpoint save"] == "FAIL" and verdict["moe all-to-all"] == "FAIL" and not ok
 
@@ -396,7 +439,7 @@ def test_parse_accepts_overrides_on_both_sides_of_the_flags():
 
 def _run_main(out_dir, tag, *extra):
     argv = ["--config", str(TINY), "--tag", tag, "--steps", "4", "--warmup", "2",
-            "data.source=synthetic", f"model.vocab_size={VOCAB}", f"bench.out_dir={out_dir}", *extra]
+            *HARNESS, f"bench.out_dir={out_dir}", *extra]
     return bench.main(argv)
 
 
@@ -673,8 +716,8 @@ def test_layer_timer_event_allocation_is_reported_in_json(first_run):
 def test_layer_event_allocation_warns_for_both_passes(tmp_path, monkeypatch):
     real = bench.run_layer
 
-    def injected(s, n, level):
-        result = real(s, n, level)
+    def injected(s, n, level, warm):
+        result = real(s, n, level, warm)
         result["events_created_during_steps"] = 2
         result.setdefault("inner_pass", {})["events_created_during_steps"] = 4
         return result
@@ -699,8 +742,8 @@ def test_communication_warning_is_emitted_only_for_nonzero_counter():
 # Sunil PR24 review regression: inner recorder-pool reporting
 def test_inner_pool_warning_and_json(tmp_path, monkeypatch):
     real = bench.run_layer
-    def injected(s, n, level):
-        result = real(s, n, level)
+    def injected(s, n, level, warm):
+        result = real(s, n, level, warm)
         result["inner_pass"]["events_created_while_measuring"] = 57
         return result
     monkeypatch.setattr(bench, "run_layer", injected)
@@ -713,7 +756,7 @@ def test_inner_pool_warning_and_json(tmp_path, monkeypatch):
 def test_run_layer_copies_inner_pool_count(monkeypatch):
     real = bench.layer_pass
     calls = {"n": 0}
-    def injected(s, n, level, warm=2):
+    def injected(s, n, level, warm):
         result = real(s, n, level, warm)
         calls["n"] += 1
         if calls["n"] == 2:
@@ -721,5 +764,5 @@ def test_run_layer_copies_inner_pool_count(monkeypatch):
         return result
     monkeypatch.setattr(bench, "layer_pass", injected)
     s = bench.build(tiny_cfg(), torch.device("cpu"))
-    result = bench.run_layer(s, 1, 3)
+    result = bench.run_layer(s, 1, 3, 2)
     assert result["inner_pass"]["events_created_while_measuring"] == 57

@@ -80,10 +80,11 @@ def example_run() -> dict:
     return {
         "meta": {"gpu": "EXAMPLE-GPU", "gpu_spec": "A100-80GB", "torch": "2.x", "cuda": "12.x", "driver": "5xx.xx",
                  "device": "cuda",
-                 "commit": "0" * 40, "dirty": False, "config_file": "configs/lab_small.yaml",
+                 "commit": "0" * 40, "dirty": False, "config_file": "configs/base.yaml",
                  "overrides": [], "tag": "example", "time": "2026-10-25 12:00:00 IST"},
         "config": {"run": {"batch_size": 32, "dtype": "bf16"}, "data": {}, "model": {"n_layer": 2, "block_size": 512},
-                   "optim": {"name": "muon"}, "bench": {"modes": ["clean", "layer"]}},
+                   "optim": {"name": "muon"}, "bench": {"modes": ["clean", "layer"]},
+                   "report": {"gate_level": 2, "tol_pct": 5.0, "abs_tol_ms": 0.05, "min_compare_steps": 100}},
         "clean": {"step_ms": _s(36.5), "data_ms": _s(0.4)},
         "layer": {"level": 3, "overhead_pct": 0.8, "step_ms": _s(36.8), "step_ms_recorder_off": _s(36.5),
                   "regions": regions},

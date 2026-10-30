@@ -1,14 +1,14 @@
 """Time each part of the training step and write the run JSON.  [implemented]
 
     cd teams/06-performance
-    python -m perfkit.bench --config configs/lab_small.yaml [--tag name] [--against run.json] [key=value ...]
+    python -m perfkit.bench [--config configs/base.yaml] [--tag name] [--against run.json] [key=value ...]
 
 Examples
     python -m perfkit.bench --config configs/tiny_cpu.yaml                    # laptop: proves it runs (~30 s)
-    python -m perfkit.bench --config configs/lab_small.yaml --level 3 --modes clean,layer,trace,checkpoint
-    python -m perfkit.bench --config configs/lab_small.yaml --level 3 --against results/runs/<first>.json
-    python -m perfkit.bench --config configs/lab_small.yaml --level 3 --repeat 2   # two runs, fail above 5%
-    torchrun --nproc_per_node 2 -m perfkit.bench --config configs/lab_small.yaml --modes comm   # 2+ GPUs
+    python -m perfkit.bench --config configs/base.yaml --level 3 --modes clean,layer,trace,checkpoint
+    python -m perfkit.bench --config configs/base.yaml --level 3 --against results/runs/<first>.json
+    python -m perfkit.bench --config configs/base.yaml --level 3 --repeat 2   # two runs, fail above 5%
+    torchrun --nproc_per_node 2 -m perfkit.bench --config configs/base.yaml --modes comm   # 2+ GPUs
 
 Flags --modes, --level, --steps, --warmup are shortcuts for bench.modes=..., bench.level=..., and so
 on; any key of configs/base.yaml can be overridden as key=value. Every override is written to meta.
@@ -72,7 +72,10 @@ Instructor rules this follows (G6 group, 25 Oct)
   3b  MoE all-to-all time (comm) and checkpoint save time (checkpoint) are measured parts.
   Compute: everything runs on Colab, Kaggle or your own GPU; tiny_cpu.yaml runs on a laptop.
 
-Exit codes: 0 ok, 1 run JSON incomplete, 2 --against found a part outside tol_pct, 3 out of memory,
+5% rule (TSAI, 30 Oct): a gated part passes --against / --repeat when the two runs are within report.tol_pct
+OR less than report.abs_tol_ms apart (0.05 ms); both run times and the difference in ms are printed for every part.
+
+Exit codes: 0 ok, 1 run JSON incomplete, 2 --against found a part outside tol_pct and abs_tol_ms, 3 out of memory,
 4 no data. With --repeat: 2 when any later run is outside tol_pct; a run that ends with any other code, or is
 killed by a signal (out-of-memory killer), stops the repeat with its code (1 for a signal), never a PASS.
 """
@@ -108,7 +111,7 @@ from perfkit import metrics as M  # noqa: E402
 from perfkit import parts as P  # noqa: E402
 from perfkit import timer as T  # noqa: E402
 from perfkit.regions import phase, point, region, use_recorder  # noqa: E402
-from perfkit.report import ab_note, compare_config_value, compare_lines  # noqa: E402
+from perfkit.report import PASSED, ab_note, compare_config_value, compare_lines, gate  # noqa: E402
 from perfkit.schema import validate_run  # noqa: E402
 
 BENCH_VERSION = 1
@@ -187,18 +190,12 @@ def choose_dtype(want: str, device: torch.device, notes: list) -> str:
     return want
 
 
-AUTO_BATCH = {"native_bf16": 32, "other": 8}   # the rule perfkit.smoke uses
-
-
-def resolve_batch(want, device: torch.device, notes: list | None = None) -> int:
-    """run.batch_size: a number, or auto = 32 on a GPU with native bf16 (A100, L4, H100), else 8 (T4, P100,
-    V100, CPU, MPS). B=32 on a T4 does not fit: the fp32 logits of the 131K vocabulary alone are 8 GB."""
-    if want != "auto":
-        return int(want)
-    b = AUTO_BATCH["native_bf16" if device.type == "cuda" and native_bf16() else "other"]
-    if notes is not None:
-        notes.append(f"run.batch_size=auto: B={b} on this device")
-    return b
+def resolve_batch(want) -> int:
+    """run.batch_size: a positive number from the config. Nothing is picked from the device: set it in the
+    YAML (B=32 does not fit a T4: the fp32 logits of the 131K vocabulary alone are 8 GB)."""
+    if isinstance(want, bool) or not isinstance(want, int) or want < 1:
+        raise SystemExit(f"run.batch_size={want!r}: set a positive number in the config (e.g. 32, or 8 on a T4)")
+    return want
 
 
 def seed_everything(seed: int):
@@ -217,23 +214,23 @@ def build(cfg: dict, device: torch.device) -> Setup:
     mcfg = model_config(cfg)
     run, data = cfg["run"], cfg["data"]
     notes = []
-    run["batch_size"] = resolve_batch(run["batch_size"], device, notes)   # written back: the run JSON has the B used
+    run["batch_size"] = resolve_batch(run["batch_size"])
     seed_everything(run["seed"])
-    dtype = choose_dtype(run.get("dtype", "bf16"), device, notes)
-    loader = Loader(data["source"], run["batch_size"], mcfg.block_size, device, data_dir=data.get("dir"),
-                    vocab_size=mcfg.vocab_size, seed=run["seed"], tokenizer_path=data.get("tokenizer_path"))
-    schedule = cfg["optim"].get("schedule", "constant")
+    dtype = choose_dtype(run["dtype"], device, notes)
+    loader = Loader(data["source"], run["batch_size"], mcfg.block_size, device, data_dir=data["dir"],
+                    vocab_size=mcfg.vocab_size, seed=run["seed"], tokenizer_path=data["tokenizer_path"])
+    schedule = cfg["optim"]["schedule"]
     if schedule != "constant":
         notes.append(f"optim.schedule={schedule} is ignored: bench times every step at the base learning rate")
     core = GPT(mcfg, loader.token_bytes(mcfg.ke_max_pos) if mcfg.embedding == "ke1" else None).to(device)
     core.train()
-    model = torch.compile(core) if run.get("compile") else core
+    model = torch.compile(core) if run["compile"] else core
     opt = build_optimizer(core, cfg["optim"])
     scaler = torch.amp.GradScaler("cuda") if (device.type == "cuda" and dtype == "fp16") else None
     if scaler is not None:
         notes.append("fp16 + GradScaler: scaler.step reads found_inf on the host, one sync per step inside opt "
                      "(PLAN 2.5 rule 1 cannot hold for fp16)")
-    clip = run.get("grad_clip") or None
+    clip = run["grad_clip"] or None
     return Setup(cfg, mcfg, device, dtype, loader, core, model, opt, scaler, clip, notes)
 
 
@@ -300,7 +297,7 @@ def run_clean(s: Setup, n: int):
     return clean, loss, M.memory(s.device)
 
 
-def layer_pass(s: Setup, n: int, max_level: int, warm: int = 2) -> dict:
+def layer_pass(s: Setup, n: int, max_level: int, warm: int) -> dict:
     """n steps with the recorder, n without, alternating. Returns the layer section for this level."""
     pool = T.EventPool() if s.device.type == "cuda" else None
     n_ev = 0
@@ -358,14 +355,14 @@ def layer_pass(s: Setup, n: int, max_level: int, warm: int = 2) -> dict:
     return out
 
 
-def run_layer(s: Setup, n: int, level: int) -> dict:
+def run_layer(s: Setup, n: int, level: int, warm: int) -> dict:
     gated = min(level, 2)
-    main = layer_pass(s, n, gated)
+    main = layer_pass(s, n, gated, warm)
     for r in main["regions"].values():
         r["pass"] = gated
     if level < 3:
         return main
-    inner = layer_pass(s, n, level)
+    inner = layer_pass(s, n, level, warm)
     regions = {}
     for name, r in inner["regions"].items():          # inner order puts each part under its parent
         if r["level"] <= gated:
@@ -516,7 +513,7 @@ def a2a_plan(cfg: dict, mcfg, dtype: str) -> dict | None:
             "payload_dtype": "fp32", "level": 2}
 
 
-def run_comm(plan: dict, device: torch.device, reps: int = 30) -> dict:
+def run_comm(plan: dict, device: torch.device, reps: int) -> dict:
     """Time all_to_all_single with the plan's payload on every rank; reports the slowest rank."""
     import torch.distributed as dist
     W = dist.get_world_size()
@@ -557,12 +554,12 @@ def run_metadata(s: Setup, config_file: str, overrides: list, tag: str) -> dict:
     meta.update({
         "config_file": config_file, "overrides": overrides, "tag": tag,
         "time": _dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z"),
-        "dtype": s.dtype, "dtype_requested": s.cfg["run"].get("dtype"), "notes": list(s.notes),
+        "dtype": s.dtype, "dtype_requested": s.cfg["run"]["dtype"], "notes": list(s.notes),
         "batch_size": s.loader.B, "seq_len": s.loader.T, "tokens_per_step": s.loader.B * s.loader.T,
         "vocab_size": s.mcfg.vocab_size, "data_source": s.cfg["data"]["source"],
         "tokenizer": {"name": "BrahmicTokenizer-131K", "revision": TOKENIZER_REVISION, "sha256": TOKENIZER_SHA256,
                       "vocab_size": s.loader.vocab_size},
-        "lr_schedule": s.cfg["optim"].get("schedule", "constant"),
+        "lr_schedule": s.cfg["optim"]["schedule"],
         "bench_version": BENCH_VERSION,
         "timing": {"cuda": "cuda_events", "mps": "sync_per_boundary", "cpu": "perf_counter"}.get(s.device.type),
     })
@@ -650,9 +647,10 @@ def summary(run: dict, gate_level: int) -> str:
     return "\n".join(lines)
 
 
-def quick_compare(a: dict, b: dict, tol_pct: float, gate_level: int) -> tuple:
+def quick_compare(a: dict, b: dict, tol_pct: float, gate_level: int, abs_tol_ms: float) -> tuple:
     """This run (a) against an earlier one (b): the whole step and every part at level <= gate_level in
-    either run, plus checkpoint save and all-to-all when both runs have them. diff = slower / faster - 1.
+    either run, plus checkpoint save and all-to-all when both runs have them. diff = slower / faster - 1;
+    a part passes within tol_pct or less than abs_tol_ms apart (perfkit.report.gate).
     Refused (problems) when the GPU, dtype, shapes or COMPARE_CONFIG differ. A part only one run has is
     MISSING. A quick look on the console; the official check is perfkit.report.compare."""
     problems = []
@@ -682,10 +680,9 @@ def quick_compare(a: dict, b: dict, tol_pct: float, gate_level: int) -> tuple:
             rows.append((name, x, y, None, "MISSING"))
             ok = False
             continue
-        diff = 0.0 if x == y else (max(x, y) / min(x, y) - 1) * 100 if min(x, y) > 0 else math.inf
-        good = diff <= tol_pct
-        ok &= good
-        rows.append((name, x, y, diff, "ok" if good else "FAIL"))
+        diff, verdict = gate(x, y, tol_pct, abs_tol_ms)
+        ok &= verdict in PASSED
+        rows.append((name, x, y, diff, verdict))
     return rows, ok, problems
 
 
@@ -733,13 +730,14 @@ def _slug(s: str) -> str:
 
 def parse(argv):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--config", required=True)
+    ap.add_argument("--config", default=str(Path(__file__).resolve().parents[1] / "configs" / "base.yaml"),
+                    help="default: configs/base.yaml")
     ap.add_argument("--tag", default=None, help="run name; default <config>_<gpu>_<time>")
     ap.add_argument("--modes", default=None, help=f"comma list from {','.join(MODES)} (= bench.modes)")
     ap.add_argument("--level", type=int, default=None, help="1 phases, 2 layers, 3 inside layers (= bench.level)")
     ap.add_argument("--steps", type=int, default=None, help="measured steps per mode (= bench.steps)")
     ap.add_argument("--warmup", type=int, default=None, help="warmup steps (= bench.warmup)")
-    ap.add_argument("--peak-tflops", type=float, default=None, help="for a GPU not in the peak table")
+    ap.add_argument("--peak-tflops", type=float, default=None, help="(= bench.peak_tflops) for a GPU not in the peak table")
     ap.add_argument("--against", default=None, help="an earlier run JSON: check every gated part within tol_pct")
     ap.add_argument("--repeat", type=int, default=1,
                     help="run the benchmark N times and compare each run with the first (exit 2 above tol_pct)")
@@ -748,7 +746,7 @@ def parse(argv):
     ov = list(a.overrides)
     if a.modes:
         ov.append(f"bench.modes=[{a.modes}]")
-    for key, val in (("level", a.level), ("steps", a.steps), ("warmup", a.warmup)):
+    for key, val in (("level", a.level), ("steps", a.steps), ("warmup", a.warmup), ("peak_tflops", a.peak_tflops)):
         if val is not None:
             ov.append(f"bench.{key}={val}")
     return a, ov
@@ -767,7 +765,7 @@ def run_once(a, overrides):
     cfg = load_config(a.config, overrides)
     mcfg = model_config(cfg)              # fail early on a bad config
     b = cfg["bench"]
-    modes = list(b.get("modes") or ["clean"])
+    modes = list(b["modes"])
     unknown = sorted(set(modes) - set(MODES))
     if unknown:
         raise SystemExit(f"unknown bench.modes {unknown}: {', '.join(MODES)}")
@@ -785,11 +783,11 @@ def run_once(a, overrides):
         dist.init_process_group("nccl" if torch.cuda.is_available() else "gloo",
                                 timeout=_dt.timedelta(minutes=60))
         device = pick_device(cfg["run"]["device"])
-        cfg["run"]["batch_size"] = resolve_batch(cfg["run"]["batch_size"], device)
-        dtype = choose_dtype(cfg["run"].get("dtype", "bf16"), device, [])
+        cfg["run"]["batch_size"] = resolve_batch(cfg["run"]["batch_size"])
+        dtype = choose_dtype(cfg["run"]["dtype"], device, [])
         plan = a2a_plan(cfg, mcfg, dtype)
         if plan is not None and device.type == "cuda":
-            comm = {"moe_a2a": run_comm(plan, device)}
+            comm = {"moe_a2a": run_comm(plan, device, b["comm_reps"])}
         rank = dist.get_rank()
         dist.destroy_process_group()
         if rank != 0:
@@ -847,7 +845,7 @@ def run_once(a, overrides):
 
         if "layer" in modes:
             print(f"[bench] layer (level {b['level']}) ...", flush=True)
-            run["layer"] = run_layer(s, b["steps"], b["level"])
+            run["layer"] = run_layer(s, b["steps"], b["level"], b["layer_warmup"])
             lay = run["layer"]
             if lay["overhead_pct"] is not None and lay["overhead_pct"] > b["max_overhead_pct"]:
                 warns.append(f"recorder overhead {lay['overhead_pct']:.1f}% > {b['max_overhead_pct']}%: "
@@ -864,7 +862,7 @@ def run_once(a, overrides):
             run["trace"] = run_trace(s, b["trace_steps"], tag)
         if "checkpoint" in modes:
             print("[bench] checkpoint ...", flush=True)
-            run["checkpoint"] = run_checkpoint(s, b.get("ckpt_repeats", 10), tag)
+            run["checkpoint"] = run_checkpoint(s, b["ckpt_repeats"], tag)
         if "comm" in modes:
             if comm is None:
                 plan = a2a_plan(cfg, s.mcfg, s.dtype)
@@ -884,10 +882,10 @@ def run_once(a, overrides):
         return 3, None
 
     peak, _ = M.peak_tflops(meta["gpu"], s.dtype)
-    peak = a.peak_tflops or peak
+    peak = b["peak_tflops"] or peak
     run["metrics"] = compute_metrics(s, run["clean"]["step_ms"]["median"], peak)
     if peak is None and device.type == "cuda":
-        warns.append(f"no peak TFLOPS for {meta['gpu']} / {s.dtype}: MFU is empty (pass --peak-tflops)")
+        warns.append(f"no peak TFLOPS for {meta['gpu']} / {s.dtype}: MFU is empty (set bench.peak_tflops)")
     # PARTS.md section 2: startup = imports done, model + optimizer built; first_step includes torch.compile /
     # autotune when they run; warmup = the remaining warmup steps. Time and token goodput are still to write.
     run["goodput"] = {"badput_s": buckets.as_dict()}
@@ -899,12 +897,12 @@ def run_once(a, overrides):
     run["warnings"] = warns
     problems = validate_run(run)
 
-    gate = cfg.get("report", {}).get("gate_level", 2)
+    gate_level = cfg["report"]["gate_level"]
     out_dir = ROOT / Path(b["out_dir"]).expanduser()                    # relative = inside teams/06-performance
     path = free_path(out_dir, tag)
     if run.get("trace"):
         part_traces(run, path.parent / f"{path.stem}_parts", warns)
-    print(summary(run, gate))
+    print(summary(run, gate_level))
     path = write_run(run, out_dir, tag, path)
     print(f"\n[bench] run JSON -> {_show(path)}")
     try:
@@ -922,11 +920,15 @@ def run_once(a, overrides):
 
     if a.against:
         other = json.loads(Path(a.against).read_text())
-        tol = cfg.get("report", {}).get("tol_pct", 5.0)
-        rows, ok, why = quick_compare(run, other, tol, gate)
+        rep = cfg["report"]
+        tol, abs_tol, min_steps = rep["tol_pct"], rep["abs_tol_ms"], rep["min_compare_steps"]
+        rows, ok, why = quick_compare(run, other, tol, gate_level, abs_tol)
         print(f"\nagainst {_show(Path(a.against))} (ms)")
-        for line in compare_lines(rows, ok, why, ab_note(run, other), tol, gate):
+        for line in compare_lines(rows, ok, why, ab_note(run, other), tol, gate_level, abs_tol):
             print(line)
+        if b["steps"] < min_steps:
+            print(f"[warn] bench.steps={b['steps']} < report.min_compare_steps={min_steps}: each part is the median "
+                  f"of only {b['steps']} calls, too few for a stable comparison of very small parts")
         if not ok:
             code = code or 2
     return code, path
@@ -1045,13 +1047,13 @@ def rule_checks(run: dict, modes: list, cfg: dict) -> list:
         out.append(f"rule 3b: {' and '.join(missing)} not measured; add {','.join(missing)} to --modes")
     if run.get("layer"):
         noisy = [n for n, r in run["layer"]["regions"].items()
-                 if r["level"] <= cfg.get("report", {}).get("gate_level", 2) and (r["spread_pct"] or 0) > 10]
+                 if r["level"] <= cfg["report"]["gate_level"] and (r["spread_pct"] or 0) > 10]
         if noisy:
             out.append(f"{len(noisy)} gated part(s) have p10..p90 spread > 10%, so may miss the 5% check: "
                        + ", ".join(noisy[:6]) + (f" (+{len(noisy) - 6} more)" if len(noisy) > 6 else ""))
     if me["device"] == "mps":
         out.append("MPS has no reliable timing events: parts were timed with a sync at every boundary")
-    if cfg["run"].get("compile") and run.get("layer"):
+    if cfg["run"]["compile"] and run.get("layer"):
         out.append("run.compile=true: regions inside compiled code are not timed reliably; trust clean and trace")
     return out
 
