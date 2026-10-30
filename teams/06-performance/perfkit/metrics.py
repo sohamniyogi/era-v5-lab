@@ -42,6 +42,8 @@ ROOT = Path(__file__).resolve().parents[1]
 # first. An empty table = known GPU, unknown peak: MFU is left empty and the run says so (or pass --peak-tflops).
 PEAKS = [
     ("B200", {"bf16": 2250, "fp16": 2250}),
+    # H200 NVL has lower dense throughput than H200 SXM; keep this specific match before H200.
+    ("H200 NVL", {"bf16": 835.5, "fp16": 835.5, "fp32": 60}),
     ("H200", {"bf16": 989, "fp16": 989, "fp32": 67}),
     ("H100 PCIe", {"bf16": 756, "fp16": 756, "fp32": 51}),
     ("H100 NVL", {}),
@@ -52,6 +54,8 @@ PEAKS = [
     ("L4", {"bf16": 121, "fp16": 121, "fp32": 30.3}),
     ("A10G", {}),
     ("A10", {"bf16": 125, "fp16": 125, "fp32": 31.2}),
+    # RTX 3060: 101 Tensor TFLOPS includes 2:4 sparsity; this table records dense peak.
+    ("RTX 3060", {"bf16": 50.5, "fp16": 50.5, "fp32": 13}),
     ("RTX 4090", {"bf16": 165, "fp16": 165, "fp32": 82.6}),
     ("RTX 3090", {"bf16": 71, "fp16": 71, "fp32": 35.6}),
     ("V100", {"fp16": 125, "fp32": 15.7}),

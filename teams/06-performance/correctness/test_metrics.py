@@ -67,11 +67,33 @@ def test_mfu_without_peak_leaves_utilization_unknown_but_reports_throughput():
 
 
 @pytest.mark.parametrize(
-    ("gpu", "dtype", "expected"),
-    [("NVIDIA A100-SXM4-80GB", "bf16", (312, "A100")),
-     ("NVIDIA H100 NVL", "bf16", (None, "H100 NVL")),
-     ("unlisted accelerator", "bf16", (None, None)),
-     ("NVIDIA V100", "bf16", (None, "V100"))],
+    ("gpu", "spec", "peaks"),
+    [
+        # Dense TFLOPS by dtype. Deliberately keep expected values independent of perfkit.metrics.PEAKS.
+        ("NVIDIA B200", "B200", {"bf16": 2250, "fp16": 2250}),
+        ("NVIDIA B300", None, {}),  # not currently listed in PEAKS
+        ("NVIDIA H200 SXM", "H200", {"bf16": 989, "fp16": 989, "fp32": 67}),
+        ("NVIDIA H200 NVL", "H200 NVL", {"bf16": 835.5, "fp16": 835.5, "fp32": 60}),
+        ("NVIDIA H100 PCIe", "H100 PCIe", {"bf16": 756, "fp16": 756, "fp32": 51}),
+        ("NVIDIA H100 SXM5 80GB", "H100", {"bf16": 989, "fp16": 989, "fp32": 67}),
+        ("NVIDIA H100 NVL", "H100 NVL", {}),
+        # Common Colab A100 reports include the board and memory size in the device name.
+        ("NVIDIA A100-SXM4-40GB", "A100", {"bf16": 312, "fp16": 312, "fp32": 19.5}),
+        ("NVIDIA A100-SXM4-80GB", "A100", {"bf16": 312, "fp16": 312, "fp32": 19.5}),
+        ("NVIDIA A100-PCIE-40GB", "A100", {"bf16": 312, "fp16": 312, "fp32": 19.5}),
+        ("NVIDIA GeForce RTX 4090", "RTX 4090", {"bf16": 165, "fp16": 165, "fp32": 82.6}),
+        ("NVIDIA GeForce RTX 3060", "RTX 3060", {"bf16": 50.5, "fp16": 50.5, "fp32": 13}),
+        ("NVIDIA GeForce RTX 5070 Ti", None, {}),  # not currently listed in PEAKS
+        ("NVIDIA GeForce RTX 3090", "RTX 3090", {"bf16": 71, "fp16": 71, "fp32": 35.6}),
+        ("NVIDIA L4", "L4", {"bf16": 121, "fp16": 121, "fp32": 30.3}),
+        ("Tesla T4", "T4", {"fp16": 65, "fp32": 8.1}),
+        ("NVIDIA V100", "V100", {"fp16": 125, "fp32": 15.7}),
+        ("NVIDIA P100", "P100", {"fp16": 18.7, "fp32": 9.3}),
+        ("NVIDIA A10G", "A10G", {}),
+        ("NVIDIA A10", "A10", {"bf16": 125, "fp16": 125, "fp32": 31.2}),
+        ("unlisted accelerator", None, {}),
+    ],
 )
-def test_peak_tflops_known_unknown_gpu_and_dtype(gpu, dtype, expected):
-    assert peak_tflops(gpu, dtype) == expected
+def test_peak_tflops_for_gpu_name_across_supported_dtypes(gpu, spec, peaks):
+    for dtype in ("bf16", "fp16", "fp32", "fp8", "fp4"):
+        assert peak_tflops(gpu, dtype) == (peaks.get(dtype), spec), f"{gpu}, dtype={dtype}"
