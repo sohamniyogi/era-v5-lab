@@ -90,6 +90,18 @@ isolated communication measurement, not a distributed training benchmark. `--rep
 and therefore cannot be combined with an explicit shared run ID. The per-run `system` aggregates continue to
 describe the GPU selected for the benchmark; JSONL contains separate samples for every visible GPU.
 
+The same JSONL also contains one `step_timing` event per clean step, with `run_id`, `node_id`, global `rank`,
+`local_rank`, one-based `step`, `data_ms`, `raw_step_ms`, and a UTC timestamp. A standalone process uses rank 0;
+under `torchrun`, rank identifiers come from `RANK` and `LOCAL_RANK`. `raw_step_ms` matches
+`clean.raw_step_ms` to four decimal places. `data_ms` is host wall time spent inside `Loader.next_batch()`;
+on CUDA, a nonblocking host-to-device copy may still be in flight when that call returns.
+
+Step timing events reuse the step timer's existing CUDA event pair. A background worker polls event completion with
+`Event.query()`, computes elapsed time only after completion, and writes the JSONL record. It adds no
+`cuda.synchronize()` or per-step event pair to the measured path; disk writes and event reads stay off the
+training thread. Events arrive after their GPU work completes, so the JSONL is live with a short asynchronous
+delay. Existing `clean.raw_step_ms` and `clean.data_ms` summaries are retained.
+
 | Key | nvidia-smi field | Meaning |
 |---|---|---|
 | `gpu_util_pct` | `utilization.gpu` | % of the sample period in which at least one kernel ran. Not SM occupancy: one tiny kernel at a time reads 100%. Use `trace.gpu_busy_pct` for idle gaps between kernels. |

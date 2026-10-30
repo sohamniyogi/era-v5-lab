@@ -1,12 +1,13 @@
 """Live JSONL event record contract."""
 import json
 import io
+import threading
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from perfkit.events import JsonlWriter, gpu_sample_record
+from perfkit.events import JsonlWriter, StepTimingStreamer, gpu_sample_record
 from perfkit.metrics import GpuSampler
 
 
@@ -71,3 +72,38 @@ def test_gpu_sampler_streams_distinct_rows_for_multiple_gpus():
 
     assert [row["uuid"] for row, _ in samples] == ["GPU-a", "GPU-b"]
     assert [step for _, step in samples] == [8, 8]
+
+
+def test_step_timing_streamer_reports_data_and_raw_step_ms_off_thread_without_sync(tmp_path):
+    path = tmp_path / "steps.jsonl"
+    caller_thread = threading.get_ident()
+
+    class StartEvent:
+        elapsed_thread = None
+
+        def elapsed_time(self, end):
+            self.elapsed_thread = threading.get_ident()
+            assert end.query_thread == self.elapsed_thread
+            return 12.34567
+
+    class EndEvent:
+        query_thread = None
+
+        def query(self):
+            self.query_thread = threading.get_ident()
+            return True
+
+        def synchronize(self):
+            raise AssertionError("step event reporting must not synchronize CUDA")
+
+    start, end = StartEvent(), EndEvent()
+    with JsonlWriter(path) as writer:
+        with StepTimingStreamer(writer, run_id="run-1", node_id="node-a", rank=3, local_rank=1) as stream:
+            stream.submit(4, 0.45678, "event", (start, end))
+
+    row = json.loads(path.read_text(encoding="utf-8"))
+    assert row["event"] == "step_timing"
+    assert (row["run_id"], row["node_id"], row["rank"], row["local_rank"], row["step"]) == (
+        "run-1", "node-a", 3, 1, 4)
+    assert row["data_ms"] == 0.4568 and row["raw_step_ms"] == 12.3457
+    assert start.elapsed_thread == end.query_thread != caller_thread

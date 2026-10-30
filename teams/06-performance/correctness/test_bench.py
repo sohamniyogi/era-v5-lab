@@ -475,7 +475,14 @@ def test_main_writes_a_complete_valid_run(first_run):
     run = first_run["run"]
     assert first_run["code"] == 0, "exit code 0 means validate_run found nothing missing"
     assert validate_run(run) == []
-    assert Path(run["meta"]["events_jsonl"]).exists()
+    event_path = Path(run["meta"]["events_jsonl"])
+    assert event_path.exists()
+    events = [json.loads(line) for line in event_path.read_text().splitlines()]
+    steps = [event for event in events if event["event"] == "step_timing"]
+    assert [event["step"] for event in steps] == [1, 2, 3, 4]
+    assert all(event["node_id"] == run["meta"]["node_id"] and event["rank"] == 0 for event in steps)
+    assert all(event["data_ms"] >= 0 and event["raw_step_ms"] > 0 for event in steps)
+    assert [event["raw_step_ms"] for event in steps] == run["clean"]["raw_step_ms"]
     assert run["meta"]["vocab_size"] == VOCAB and run["meta"]["tokenizer"]["revision"] == bench.TOKENIZER_REVISION
     assert run["clean"]["step_ms"]["n"] == 4 and run["clean"]["step_ms"]["median"] > 0
     assert run["metrics"]["tokens_per_s"] > 0 and run["metrics"]["params_total"] >= run["metrics"]["params_active"]
