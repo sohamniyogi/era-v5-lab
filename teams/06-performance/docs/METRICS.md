@@ -59,6 +59,19 @@ H100, A100, L40S, …). First match wins, so specific names come first.
 `tokens_per_s` comes from the clean median step time and `tokens_per_step` (batch × sequence).
 Report and G8 must use the value already stored in the run JSON, not recompute a different one.
 
+## Peak memory and run identity
+
+When present, `memory.peak_allocated_gb` and `memory.peak_reserved_gb` describe the CUDA device used by
+that benchmark process. The `memory.gpu` object identifies it by name, local CUDA index, UUID, and PCI bus ID.
+The historical `_gb` field names contain **GiB** values (bytes divided by 2^30); `memory.unit` is explicitly
+`"GiB"` so consumers do not need to infer the unit from the name.
+
+Every independent G6 benchmark invocation gets its own generated `meta.run_id` unless `--run-id <id>` is
+provided. To correlate measurements of the same experiment, pass the exact same ID to G6 and G5, and have the
+G5 harness write it into its records. G6 does not choose or transmit an ID to a separate harness. Leave
+`--run-id` unset for independent runs. `--repeat N` creates a fresh ID per child run and rejects a shared
+`--run-id`, since those are separate measurements.
+
 ## Dirty commit
 
 `meta.dirty` is true when the working tree under `teams/06-performance` (outside `results/`)

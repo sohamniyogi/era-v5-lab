@@ -69,6 +69,19 @@ def validate_run(run: dict) -> list:
             problems.append(f"metrics.{reason_key} is required when metrics.{metric} is null")
         if value is not None and reason is not None:
             problems.append(f"metrics.{reason_key} must be null when metrics.{metric} is available")
+    memory = run.get("memory")
+    if memory is not None:
+        if not isinstance(memory, dict):
+            problems.append("memory must be an object")
+        else:
+            for key in ("peak_allocated_gb", "peak_reserved_gb", "unit", "gpu.name", "gpu.index",
+                        "gpu.uuid", "gpu.pci_bus_id"):
+                try:
+                    _get(memory, key)
+                except KeyError:
+                    problems.append(f"memory missing {key}")
+            if memory.get("unit") != "GiB":
+                problems.append("memory.unit must be 'GiB'")
     return problems
 
 
@@ -103,6 +116,9 @@ def example_run() -> dict:
                    "optim": {"name": "muon"}, "bench": {"modes": ["clean", "layer"]},
                    "report": {"gate_level": 2, "tol_pct": 5.0, "abs_tol_ms": 0.05, "min_compare_steps": 100}},
         "clean": {"step_ms": _s(36.5), "data_ms": _s(0.4)},
+        "memory": {"peak_allocated_gb": 12.4, "peak_reserved_gb": 15.8, "unit": "GiB",
+                    "gpu": {"name": "EXAMPLE-GPU", "index": 0, "uuid": "GPU-example",
+                            "pci_bus_id": "00000000:01:00.0"}},
         "layer": {"level": 3, "overhead_pct": 0.8, "step_ms": _s(36.8), "step_ms_recorder_off": _s(36.5),
                   "regions": regions},
         "metrics": {"tokens_per_step": 16384, "tokens_per_s": 448876, "mfu": 0.031, "hfu": 0.052,

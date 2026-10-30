@@ -590,6 +590,18 @@ def process_ranks(device) -> tuple[int, int]:
     return read("RANK", 0), read("LOCAL_RANK", local_default)
 
 
+def memory_with_identity(memory: dict | None, meta: dict) -> dict | None:
+    """Attach the measured CUDA device and make the binary GiB unit explicit."""
+    if memory is None:
+        return None
+    return {
+        **memory,
+        "unit": "GiB",
+        "gpu": {"name": meta.get("gpu"), "index": meta.get("gpu_index"),
+                "uuid": meta.get("gpu_uuid"), "pci_bus_id": meta.get("gpu_pci_bus_id")},
+    }
+
+
 def compute_metrics(s: Setup, step_ms: float, peak, peak_reason: str | None = None) -> dict:
     """Tokens/s from the clean step time; MFU and HFU from perfkit.metrics (formulas in its docstring)."""
     tokens = s.loader.B * s.loader.T
@@ -900,7 +912,7 @@ def run_once(a, overrides):
         warn_timing_allocations(warns, run["clean"]["events_created_during_steps"], "clean")
         meta["loss_end"] = float(loss)
         if mem:
-            run["memory"] = mem
+            run["memory"] = memory_with_identity(mem, meta)
         if not math.isfinite(meta["loss_end"]):
             warns.append(f"loss is {meta['loss_end']}: the numbers time a broken run")
         tel_busy = M.telemetry_during(device, lambda: [train_step(s) for _ in range(3)])   # untimed steps

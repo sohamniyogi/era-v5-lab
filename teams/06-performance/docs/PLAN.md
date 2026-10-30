@@ -145,7 +145,7 @@ trace:     trace_file, top_ops, gpu_busy_pct, kernels_per_step
           GPU UUID/PCI bus ID or rank/local_rank, timestamp, step, raw sample metrics or data_ms/raw_step_ms
 metrics:   tokens_per_step, tokens_per_s, mfu, hfu, mfu_unavailable_reason, hfu_unavailable_reason,
            params_total, params_active, model_flops_per_token, peak_tflops
-[memory]:  peak_allocated_gb, peak_reserved_gb
+[memory]:  peak_allocated_gb, peak_reserved_gb (GiB despite `_gb` names), unit=GiB, gpu {name,index,uuid,pci_bus_id}
 [goodput]: badput_s {startup, first_step, warmup}                [time_goodput, token_goodput_per_s: to write]
 [checkpoint]: save_ms, to_cpu_ms, write_ms {stats}, size_mb, write_mb_per_s, level, repeats,
               discarded_first, pinned, where
