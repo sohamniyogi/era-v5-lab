@@ -38,11 +38,11 @@ Everything is driven by config: a new model is a new YAML file in `configs/`, no
 configs/       base.yaml (every setting; plain NanoGPT on its own), lab_small.yaml, tiny_cpu.yaml
 models/        config.py, gpt.py, ke1.py, moe.py, reversible.py, optim.py
 dataio/        tokenizer.py (pinned BrahmicTokenizer-131K), prepare_fineweb.py, loader.py
-perfkit/       regions.py, timer.py, bench.py, parts.py, metrics.py, report.py, schema.py, smoke.py
+perfkit/       regions.py, timer.py, bench.py, parts.py, metrics.py, report.py, roofline.py, schema.py, smoke.py
 correctness/   framework.py, conftest.py and the test files
 results/       README.md, baseline_v0.md, slowest5_v0.md, runs/ (run JSON + Markdown, part traces)
 docs/          PLAN.md (interfaces, what is done and left), PARTS.md (every part we time),
-               METRICS.md (MFU / HFU and system metrics, for G8)
+               METRICS.md (MFU / HFU and system metrics, for G8), ROOFLINE.md (analytical estimator)
 ```
 
 ## Status
@@ -164,6 +164,14 @@ python -m perfkit.bench --config configs/lab_small.yaml --modes clean,layer --le
 ```
 
 Read the clean step median, tokens/s, and the level-3 `blockN.moe.dispatch` or `opt.muon.ns` rows (information only). Keep the default `report.gate_level=2`: the 5% rule covers the step parts and whole blocks, not the parts inside a block (instructor rule 3a). Use real data: the sorted dispatch pads every expert to the busiest one, and synthetic tokens hide routing skew.
+
+**Roofline estimate** (analytical lower bounds, not measured performance):
+
+```bash
+python -m perfkit.roofline --config configs/lab_small.yaml --gpu "NVIDIA A100-SXM4-40GB" --run results/runs/baseline_v0.json
+```
+
+See [`docs/ROOFLINE.md`](docs/ROOFLINE.md) for assumptions, overrides, and cross-GPU validation guidance.
 
 The 5% rule itself is two runs of one implementation. Before switching a default, each side must pass it:
 

@@ -43,14 +43,14 @@ teams/06-performance/
   configs/        base.yaml, lab_small.yaml, tiny_cpu.yaml
   models/         config.py, gpt.py, moe.py, reversible.py, ke1.py, optim.py
   dataio/         tokenizer.py, prepare_fineweb.py, loader.py
-  perfkit/        timer.py, regions.py, bench.py, parts.py, metrics.py, report.py, schema.py, smoke.py
+  perfkit/        timer.py, regions.py, bench.py, parts.py, metrics.py, report.py, roofline.py, schema.py, smoke.py
   correctness/    conftest.py, framework.py, test_framework.py,
                   test pairs: test_attention.py, test_ke.py, test_moe.py, test_reversible.py, test_ce.py, test_model.py
                   harness: test_timer.py, test_bench.py, test_parts.py, test_report.py
                   optimizer and data: test_optimizer.py (includes tokenizer + KE integration), test_tokenizer.py
                   metrics: test_metrics.py
   results/        README.md, baseline_v0.md, slowest5_v0.md, runs/
-  docs/           PLAN.md, PARTS.md, METRICS.md
+  docs/           PLAN.md, PARTS.md, METRICS.md, ROOFLINE.md
 ```
 
 Shared files (`config.py`, `regions.py`, `schema.py`, the `framework.py` registry)
@@ -229,6 +229,8 @@ Status "Stub": the file raises `NotImplementedError`. Its docstring has the full
 | `perfkit/metrics.py` | MFU, HFU, peak TFLOPS table, memory, `GpuSampler` (nvidia-smi through the clean steps), telemetry and slowdown reasons, run metadata, commit and dirty tree | Implemented. Still to write: time and token goodput |
 | `docs/METRICS.md` | The system metrics and the MFU method, for the G8 hand-off | Written |
 | `perfkit/report.py` | `render` (run Markdown, written next to every run JSON), `compare` (5% two-run check, refuses different GPU / commit / dirty tree / config), `baseline_md`, `slowest_md`, A/B of `IMPL_SWITCHES` | Implemented; `test_report.py` |
+| `perfkit/roofline.py` | Shape-based forward FLOPs/bytes/kernel estimates, compute/bandwidth/launch ceilings, optional comparison with measured regions | Implemented; `test_roofline.py`; cross-GPU validation awaits server run JSONs |
+| `docs/ROOFLINE.md` | Estimator assumptions, formula, and command for comparing predictions with measured regions | Written |
 | `perfkit/smoke.py` | Stopgap: one CUDA event pair per whole step, no per-part numbers | Produced the A100 smoke reference numbers |
 
 ### Correctness
