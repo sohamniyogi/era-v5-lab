@@ -167,9 +167,11 @@ def test_sampler_parses_lines_and_summarises():
     s = M.GpuSampler(torch.device("cpu"))
     s.reason, s.started = "clocks_event_reasons.active", True
     s.rows = [s.parse_line(line) for line in (
-        "90, 40, 30000, 1410, 1215, 300.0, 60, 0x0000000000000000",
-        "100, 50, 30100, 1200, 1215, 400.0, 70, 0x0000000000000004",      # SwPowerCap
-        "[N/A], 50, 30100, 1300, 1215, 350.0, 65, 0x0000000000000001")]   # GpuIdle is not a slowdown
+        "0, Test GPU, GPU-0, 00000000:01:00.0, 90, 40, 30000, 1410, 1215, 300.0, 60, 0x0000000000000000",
+        "0, Test GPU, GPU-0, 00000000:01:00.0, 100, 50, 30100, 1200, 1215, 400.0, 70, 0x0000000000000004", # SwPowerCap
+        "0, Test GPU, GPU-0, 00000000:01:00.0, [N/A], 50, 30100, 1300, 1215, 350.0, 65, 0x0000000000000001")] # GpuIdle
+    s.target_index = 0
+    s.target_pci_bus_id = "00000000:01:00.0"
     assert s.parse_line("1, 2") is None
     out = s.summary()
     assert out["samples"] == 3 and out["metrics"]["gpu_util_pct"] == {"min": 90.0, "median": 95.0, "max": 100.0,
@@ -184,7 +186,8 @@ if not any(a.startswith("--loop-ms") for a in sys.argv):
     print("0x0000000000000000")
     sys.exit(0)
 while True:
-    print("97, 40, 30000, 1410, 1215, 300.5, 60, 0x0000000000000000", flush=True)
+    print("0, Test GPU, GPU-0, 00000000:01:00.0, 97, 40, 30000, 1410, 1215, 300.5, 60, 0x0000000000000000", flush=True)
+    print("1, Other GPU, GPU-1, 00000000:02:00.0, 10, 20, 1000, 600, 800, 50.0, 40, 0x0000000000000000", flush=True)
     time.sleep(0.02)
 """
 
@@ -203,5 +206,19 @@ def test_sampler_end_to_end_with_a_fake_nvidia_smi(tmp_path, monkeypatch):
     out = s.summary()
     assert out["samples"] >= 3 and out["metrics"]["power_w"]["median"] == 300.5
     assert out["slowdown_samples"] == 0
-    assert len(records) >= 3 and records[0][1] == 7
+    assert len(records) >= 6 and records[0][1] == 7
+    assert {row["uuid"] for row, _ in records} == {"GPU-0", "GPU-1"}
     assert s._proc is None                                                  # the child was stopped
+
+
+def test_sampler_summary_filters_to_benchmarked_gpu_but_streams_every_gpu():
+    s = M.GpuSampler(torch.device("cpu"), on_sample=lambda *_: None)
+    s.reason, s.started = "clocks_event_reasons.active", True
+    s.target_index, s.target_pci_bus_id = 0, "00000000:01:00.0"
+    s.rows = [s.parse_line(line) for line in (
+        "0, Test GPU, GPU-0, 00000000:01:00.0, 90, 40, 30000, 1410, 1215, 300.0, 60, 0x0000000000000000",
+        "1, Other GPU, GPU-1, 00000000:02:00.0, 10, 20, 1000, 600, 800, 50.0, 40, 0x0000000000000000")]
+    out = s.summary()
+    assert out["samples"] == 1
+    assert out["metrics"]["gpu_util_pct"]["median"] == 90
+    assert out["gpu"] == {"index": 0, "pci_bus_id": "00000000:01:00.0"}

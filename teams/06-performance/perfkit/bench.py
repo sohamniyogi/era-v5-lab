@@ -842,12 +842,12 @@ def run_once(a, overrides):
         tel0 = M.gpu_telemetry(device)
 
         print("[bench] clean ...", flush=True)
-        gpu = {"name": meta["gpu"], "index": meta.get("gpu_index"), "uuid": meta.get("gpu_uuid"),
-               "pci_bus_id": meta.get("gpu_pci_bus_id")}
-
         def emit_gpu_sample(row, step):
             reason_field = next((field for field in M.REASON_FIELDS if field in row), None)
             reason = row.get(reason_field) if reason_field else None
+            gpu_index = row.get("index")
+            gpu = {"name": row.get("name"), "index": int(gpu_index) if gpu_index is not None else None,
+                   "uuid": row.get("uuid"), "pci_bus_id": row.get("pci.bus_id")}
             record = gpu_sample_record(
                 run_id=meta["run_id"], node_id=meta["node_id"], gpu=gpu,
                 metrics={key: row.get(field) for field, key in M.SAMPLE_FIELDS.items()},
