@@ -169,7 +169,8 @@ def test_run_metadata_records_the_tokenizer():
     assert meta["vocab_size"] == VOCAB and meta["lr_schedule"] == "constant"
     assert meta["batch_size"] == s.loader.B and meta["seq_len"] == s.loader.T
     assert meta["run_id"] and meta["node_id"]
-    assert len(bench.run_metadata(s, "configs/tiny_cpu.yaml", [], "t")["run_id"]) == 32
+    auto_ids = {meta["run_id"], bench.run_metadata(s, "configs/tiny_cpu.yaml", [], "t")["run_id"]}
+    assert len(auto_ids) == 2 and all(len(run_id) == 32 for run_id in auto_ids)
 
 
 def test_run_id_and_node_id_can_be_set_for_g8_handover():
@@ -177,6 +178,26 @@ def test_run_id_and_node_id_can_be_set_for_g8_handover():
     meta = bench.run_metadata(s, "configs/tiny_cpu.yaml", [], "t", run_id="shared-exp", node_id="node-a")
     assert meta["run_id"] == "shared-exp"
     assert meta["node_id"] == "node-a"
+    peer = bench.run_metadata(s, "configs/tiny_cpu.yaml", [], "peer", run_id="shared-exp", node_id="node-b")
+    assert peer["run_id"] == meta["run_id"] and peer["node_id"] != meta["node_id"]
+
+
+def test_memory_summary_names_the_gpu_and_unit():
+    record = bench.memory_with_identity(
+        {"peak_allocated_gb": 12.5, "peak_reserved_gb": 16.0},
+        {"gpu": "Example GPU", "gpu_index": 1, "gpu_uuid": "GPU-example",
+         "gpu_pci_bus_id": "00000000:02:00.0"},
+    )
+    assert record == {
+        "peak_allocated_gb": 12.5, "peak_reserved_gb": 16.0, "unit": "GiB",
+        "gpu": {"name": "Example GPU", "index": 1, "uuid": "GPU-example",
+                "pci_bus_id": "00000000:02:00.0"},
+    }
+    assert bench.memory_with_identity(None, {}) is None
+    identified = example_run()
+    assert validate_run(identified) == []
+    identified["memory"]["unit"] = "GB"
+    assert "memory.unit must be 'GiB'" in validate_run(identified)
 
 
 def _checked_run(**meta):
@@ -573,6 +594,11 @@ def test_repeat_cmd_is_one_run_with_a_new_tag_against_the_first():
     assert "--against" not in bench.repeat_cmd(["--config", "c.yaml"], "x", None)       # the first run
 
 
+def test_repeat_rejects_a_shared_run_id():
+    with pytest.raises(SystemExit, match="--run-id is for one benchmark invocation"):
+        bench.main(["--config", str(TINY), "--run-id", "shared-exp", "--repeat", "2"])
+
+
 def test_repeat_runs_every_run_in_a_child_and_the_first_without_against(tmp_path, monkeypatch):
     calls = _in_process_repeats(monkeypatch)
     _run_main(tmp_path / "runs", "kids", "--modes", "clean", "--repeat", "2", "report.tol_pct=1000")
@@ -596,6 +622,9 @@ def test_repeat_writes_one_json_per_run_and_passes_when_they_agree(tmp_path, cap
     assert code == 0
     # <tag>.json is run 1; <tag>-run2.json is run 2, checked against run 1.
     assert sorted(p.name for p in (tmp_path / "runs").glob("*.json")) == ["rep-run2.json", "rep.json"]
+    first_run = json.loads((tmp_path / "runs" / "rep.json").read_text())
+    second_run = json.loads((tmp_path / "runs" / "rep-run2.json").read_text())
+    assert first_run["meta"]["run_id"] != second_run["meta"]["run_id"]
     out = capsys.readouterr().out
     assert "repeat: 2 runs against rep.json: PASS" in out
     assert validate_run(json.loads((tmp_path / "runs" / "rep-run2.json").read_text())) == []
