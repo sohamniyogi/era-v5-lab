@@ -141,8 +141,8 @@ trace:     trace_file, top_ops, gpu_busy_pct, kernels_per_step
 [system]:  source, interval_ms, during, samples,                 CUDA only, sampled through the clean steps
            metrics {gpu_util_pct, mem_util_pct, mem_used_mib, sm_clock_mhz, mem_clock_mhz, power_w, temp_c:
                     {min, median, max, mean}}  [slowdown_samples, slowdown_reasons]
-[JSONL]:  one live gpu_sample object per sample, versioned; run_id, node_id, GPU UUID/PCI bus ID,
-          timestamp, latest clean step, raw sample metrics, slowdown_flags
+[JSONL]:  versioned live gpu_sample per GPU sample and step_timing per clean step; run_id, node_id,
+          GPU UUID/PCI bus ID or rank/local_rank, timestamp, step, raw sample metrics or data_ms/raw_step_ms
 metrics:   tokens_per_step, tokens_per_s, mfu, hfu, mfu_unavailable_reason, hfu_unavailable_reason,
            params_total, params_active, model_flops_per_token, peak_tflops
 [memory]:  peak_allocated_gb, peak_reserved_gb

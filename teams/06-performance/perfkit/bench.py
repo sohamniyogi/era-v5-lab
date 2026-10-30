@@ -110,7 +110,7 @@ from models.config import load_config, model_config  # noqa: E402
 from models.gpt import GPT  # noqa: E402
 from models.optim import build_optimizer  # noqa: E402
 from perfkit import metrics as M  # noqa: E402
-from perfkit.events import JsonlWriter, gpu_sample_record  # noqa: E402
+from perfkit.events import JsonlWriter, StepTimingStreamer, gpu_sample_record  # noqa: E402
 from perfkit import parts as P  # noqa: E402
 from perfkit import timer as T  # noqa: E402
 from perfkit.regions import phase, point, region, use_recorder  # noqa: E402
@@ -143,6 +143,7 @@ class Setup:
     grad_clip: float | None = None
     notes: list = field(default_factory=list)
     sample_step_callback: object = None
+    step_timing_callback: object = None
 
     def autocast(self):
         amp = AMP[self.dtype]
@@ -294,8 +295,10 @@ def run_clean(s: Setup, n: int):
             s.sample_step_callback(step + 1)
         st.start()
         d, loss = train_step(s)
-        st.stop()
+        pair = st.stop()
         data.append(d)
+        if s.step_timing_callback is not None:
+            s.step_timing_callback(step + 1, d, st.kind, pair)
     times = st.times_ms()
     clean = {"step_ms": T.stats(times), "data_ms": T.stats(data),
              "raw_step_ms": [round(t, 4) for t in times],
@@ -573,6 +576,18 @@ def run_metadata(s: Setup, config_file: str, overrides: list, tag: str,
         "timing": {"cuda": "cuda_events", "mps": "sync_per_boundary", "cpu": "perf_counter"}.get(s.device.type),
     })
     return meta
+
+
+def process_ranks(device) -> tuple[int, int]:
+    """Global and local process rank for live step events; standalone runs are rank zero."""
+    def read(name, default):
+        try:
+            return int(os.environ.get(name, default))
+        except (TypeError, ValueError):
+            return int(default)
+
+    local_default = device.index if device.type == "cuda" and device.index is not None else 0
+    return read("RANK", 0), read("LOCAL_RANK", local_default)
 
 
 def compute_metrics(s: Setup, step_ms: float, peak, peak_reason: str | None = None) -> dict:
@@ -860,16 +875,23 @@ def run_once(a, overrides):
 
         print(f"[bench] live JSONL -> {_show(events_path)} (run_id={meta['run_id']}, node_id={meta['node_id']})",
               flush=True)
+        rank, local_rank = process_ranks(device)
         with JsonlWriter(events_path) as event_writer:
-            with M.GpuSampler(device, on_sample=emit_gpu_sample) as sampler:
-                s.sample_step_callback = sampler.set_step
-                try:
-                    run["clean"], loss, mem = run_clean(s, b["steps"])
-                finally:
-                    s.sample_step_callback = None
+            with StepTimingStreamer(event_writer, run_id=meta["run_id"], node_id=meta["node_id"],
+                                    rank=rank, local_rank=local_rank) as step_streamer:
+                with M.GpuSampler(device, on_sample=emit_gpu_sample) as sampler:
+                    s.sample_step_callback = sampler.set_step
+                    s.step_timing_callback = step_streamer.submit
+                    try:
+                        run["clean"], loss, mem = run_clean(s, b["steps"])
+                    finally:
+                        s.sample_step_callback = None
+                        s.step_timing_callback = None
         system = sampler.summary()
         if sampler.callback_error:
             warns.append(f"could not write a live GPU sample: {sampler.callback_error}")
+        if step_streamer.error:
+            warns.append(f"could not write a live step timing event: {step_streamer.error}")
         if system:
             run["system"] = system
             if system.get("slowdown_samples"):
