@@ -1,10 +1,10 @@
-"""Formula tests for the FLOP and hardware-utilization metrics sent with benchmark runs."""
+"""Tests for FLOP, hardware-utilization and unavailable-reason metrics."""
 import pytest
-import torch
 
 from models.config import ModelConfig
 from models.gpt import GPT
-from perfkit.metrics import flops_per_token, mfu, peak_tflops
+from perfkit.metrics import flops_per_token, mfu, peak_tflops, peak_unavailable_reason
+from perfkit.schema import example_run, validate_run
 
 
 def _tiny_model(**overrides):
@@ -31,10 +31,7 @@ def test_flops_per_token_matches_documented_model_and_hardware_formulas():
 
 @pytest.mark.parametrize(
     ("overrides", "extra"),
-    [
-        ({"reversible": True}, "reversible"),
-        ({"ce_impl": "chunked"}, "chunked"),
-    ],
+    [({"reversible": True}, "reversible"), ({"ce_impl": "chunked"}, "chunked")],
 )
 def test_flops_per_token_counts_extra_reversible_or_chunked_work(overrides, extra):
     model = _tiny_model(**overrides)
@@ -59,31 +56,82 @@ def test_mfu_and_hfu_use_model_and_hardware_flops_respectively():
     assert result["model_tflops_per_s"] == pytest.approx(2.0)
     assert result["mfu"] == pytest.approx(0.02)
     assert result["hfu"] == pytest.approx(0.03)
+    assert result["mfu_unavailable_reason"] is None
+    assert result["hfu_unavailable_reason"] is None
 
 
 def test_mfu_without_peak_leaves_utilization_unknown_but_reports_throughput():
     result = mfu({"model_flops_per_token": 2e9}, 1000, None)
-    assert result == {"model_tflops_per_s": pytest.approx(2.0), "mfu": None, "hfu": None}
+    assert result == {
+        "model_tflops_per_s": pytest.approx(2.0),
+        "mfu": None,
+        "hfu": None,
+        "mfu_unavailable_reason": "peak_tflops_unavailable",
+        "hfu_unavailable_reason": "peak_tflops_unavailable",
+    }
+
+
+def test_mfu_hfu_are_values_with_null_reasons_when_peak_is_known():
+    out = mfu({"model_flops_per_token": 2e12, "hw_flops_per_token": 3e12}, 100, 100)
+
+    assert out["mfu"] == 2.0
+    assert out["hfu"] == 3.0
+    assert out["mfu_unavailable_reason"] is None
+    assert out["hfu_unavailable_reason"] is None
+
+
+def test_missing_peak_sets_separate_reason_fields_for_both_metrics():
+    out = mfu({"model_flops_per_token": 2e12, "hw_flops_per_token": 3e12}, 100, None,
+              peak_reason="unsupported_dtype")
+
+    assert out["mfu"] is None and out["hfu"] is None
+    assert out["mfu_unavailable_reason"] == "unsupported_dtype"
+    assert out["hfu_unavailable_reason"] == "unsupported_dtype"
+
+
+def test_hfu_can_be_unavailable_while_mfu_is_available():
+    out = mfu({"model_flops_per_token": 2e12}, 100, 100)
+
+    assert out["mfu"] == 2.0
+    assert out["mfu_unavailable_reason"] is None
+    assert out["hfu"] is None
+    assert out["hfu_unavailable_reason"] == "hw_flops_unavailable"
+
+
+def test_peak_unavailable_reason_distinguishes_gpu_dtype_and_bad_override():
+    assert peak_unavailable_reason("unlisted device", "bf16") == "unknown_gpu"
+    assert peak_unavailable_reason("NVIDIA A100", "fp8") == "unsupported_dtype"
+    assert peak_unavailable_reason("NVIDIA A100", "bf16", -1) == "invalid_peak_tflops"
+    assert peak_unavailable_reason("NVIDIA A100", "bf16", 312) is None
+
+
+def test_schema_accepts_null_metric_with_reason_and_rejects_unknown_reason():
+    run = example_run()
+    run["metrics"]["mfu"] = None
+    run["metrics"]["mfu_unavailable_reason"] = "unknown_gpu"
+    assert validate_run(run) == []
+
+    run["metrics"]["hfu_unavailable_reason"] = "vendor-magic"
+    assert any("metrics.hfu_unavailable_reason" in error for error in validate_run(run))
 
 
 @pytest.mark.parametrize(
     ("gpu", "spec", "peaks"),
     [
-        # Dense TFLOPS by dtype. Deliberately keep expected values independent of perfkit.metrics.PEAKS.
+        # Dense TFLOPS by dtype. Expected values are independent of perfkit.metrics.PEAKS.
         ("NVIDIA B200", "B200", {"bf16": 2250, "fp16": 2250}),
-        ("NVIDIA B300", None, {}),  # not currently listed in PEAKS
+        ("NVIDIA B300", None, {}),
         ("NVIDIA H200 SXM", "H200", {"bf16": 989, "fp16": 989, "fp32": 67}),
         ("NVIDIA H200 NVL", "H200 NVL", {"bf16": 835.5, "fp16": 835.5, "fp32": 60}),
         ("NVIDIA H100 PCIe", "H100 PCIe", {"bf16": 756, "fp16": 756, "fp32": 51}),
         ("NVIDIA H100 SXM5 80GB", "H100", {"bf16": 989, "fp16": 989, "fp32": 67}),
         ("NVIDIA H100 NVL", "H100 NVL", {}),
-        # Common Colab A100 reports include the board and memory size in the device name.
         ("NVIDIA A100-SXM4-40GB", "A100", {"bf16": 312, "fp16": 312, "fp32": 19.5}),
         ("NVIDIA A100-SXM4-80GB", "A100", {"bf16": 312, "fp16": 312, "fp32": 19.5}),
         ("NVIDIA A100-PCIE-40GB", "A100", {"bf16": 312, "fp16": 312, "fp32": 19.5}),
         ("NVIDIA GeForce RTX 4090", "RTX 4090", {"bf16": 165, "fp16": 165, "fp32": 82.6}),
         ("NVIDIA GeForce RTX 3060", "RTX 3060", {"bf16": 50.5, "fp16": 50.5, "fp32": 13}),
-        ("NVIDIA GeForce RTX 5070 Ti", None, {}),  # not currently listed in PEAKS
+        ("NVIDIA GeForce RTX 5070 Ti", None, {}),
         ("NVIDIA GeForce RTX 3090", "RTX 3090", {"bf16": 71, "fp16": 71, "fp32": 35.6}),
         ("NVIDIA L4", "L4", {"bf16": 121, "fp16": 121, "fp32": 30.3}),
         ("Tesla T4", "T4", {"fp16": 65, "fp32": 8.1}),

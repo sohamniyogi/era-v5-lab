@@ -30,8 +30,19 @@ HFU                = tokens_per_s * hw_flops_per_token / 1e12 / peak_tflops
 MFU uses model FLOPs; HFU uses hardware FLOPs. Both divide by the **dense** vendor peak for the
 dtype the run used (`peak_tflops` in the run JSON). The run JSON `metrics` section stores `mfu`, `hfu`,
 `model_tflops_per_s`, `model_flops_per_token`, `hw_flops_per_token`, `params_total` and `params_active`;
-`mfu` and `hfu` are `null` when there is no peak. The optimizer FLOPs come from `Optimizers.flops()` in
-`models/optim.py`.
+`mfu` and `hfu` are `null` when unavailable, with a reason recorded alongside each value. The optimizer FLOPs
+come from `Optimizers.flops()` in `models/optim.py`.
+
+`metrics.mfu` and `metrics.hfu` describe the single GPU selected by the benchmark process: the token
+throughput and peak denominator are both per GPU. They are not node-wide or whole-run aggregates. G8 can
+aggregate per-GPU values from separate benchmark processes where that is meaningful. Each metric has a
+separate reason field next to it: `mfu_unavailable_reason` and `hfu_unavailable_reason`. A reason is `null`
+when its metric is present. Current allowed reason strings are `unknown_gpu` (GPU not in `PEAKS`),
+`unsupported_dtype` (known GPU has no peak entry for the run dtype), `peak_tflops_unavailable` (no usable
+vendor peak was resolved), `invalid_peak_tflops` (a configured peak is not positive), and
+`hw_flops_unavailable` (HFU only; hardware FLOPs are absent). When no peak is available both metrics carry
+the peak-related reason; if only the hardware FLOPs are absent, MFU remains available and only HFU has a
+reason.
 
 ## Correctness coverage
 
@@ -72,6 +83,19 @@ H200, H100, A100, RTX 3060, L40S, …). First match wins, so specific names come
 `tokens_per_s` comes from the clean median step time and `tokens_per_step` (batch × sequence).
 Report and G8 must use the value already stored in the run JSON, not recompute a different one.
 
+## Peak memory and run identity
+
+When present, `memory.peak_allocated_gb` and `memory.peak_reserved_gb` describe the CUDA device used by
+that benchmark process. The `memory.gpu` object identifies it by name, local CUDA index, UUID, and PCI bus ID.
+The historical `_gb` field names contain **GiB** values (bytes divided by 2^30); `memory.unit` is explicitly
+`"GiB"` so consumers do not need to infer the unit from the name.
+
+Every independent G6 benchmark invocation gets its own generated `meta.run_id` unless `--run-id <id>` is
+provided. To correlate measurements of the same experiment, pass the exact same ID to G6 and G5, and have the
+G5 harness write it into its records. G6 does not choose or transmit an ID to a separate harness. Leave
+`--run-id` unset for independent runs. `--repeat N` creates a fresh ID per child run and rejects a shared
+`--run-id`, since those are separate measurements.
+
 ## Dirty commit
 
 `meta.dirty` is true when the working tree under `teams/06-performance` (outside `results/`)
@@ -82,9 +106,38 @@ at all, `meta.commit` is taken from the `PERF_COMMIT` environment variable (or `
 
 ## System metrics (`run["system"]`, CUDA runs)
 
-`perfkit.metrics.GpuSampler` runs `nvidia-smi --loop-ms=1000` in a child process while the clean steps run
-(the steps that give step time, tokens/s and MFU), so the samples describe the same steps. Each metric has
-`min`, `median`, `max`, `mean` over the samples.
+`perfkit.metrics.GpuSampler` runs one `nvidia-smi --loop-ms=1000` child process per benchmark process while the
+clean steps run (the steps that give step time, tokens/s and MFU). It queries all GPUs visible on that node and
+emits a separate row for each GPU at each sample interval. The `system.metrics` min/median/max/mean aggregates
+in the final JSON remain scoped to the benchmark's selected GPU; `system.gpu` identifies it. The sampler also
+streams individual records
+to the run's `<tag>.jsonl` sidecar as they arrive. Each line is a JSON object with `schema_version`, `event`,
+UTC `timestamp`, `run_id`, `node_id`, `gpu` (`name`, local `index`, `uuid`, `pci_bus_id`), current clean `step`
+when available, raw `metrics`, and `slowdown_flags`. `mem_used_mib` remains in MiB for G8 to convert. Reading
+the JSONL does not synchronize CUDA; a separate thread consumes `nvidia-smi` output and flushes each event.
+By default each invocation gets a unique `run_id`; pass `--run-id <id>` to share an ID across coordinated G5/G6
+or multi-node invocations. `--node-id` overrides the default node name (`G8_NODE_ID` or hostname). For a
+multi-node run, start one benchmark collector on each node with the same run ID and a distinct node ID; each
+collector samples every GPU visible on its node. Use node-local output directories, or distinct `--tag` values
+when the output directory is shared, so each node writes its own JSON and JSONL sidecars. For example, on each
+node run `python -m perfkit.bench --run-id exp-42 --node-id node-a --tag exp-42-node-a ...` (change the node
+ID and tag on the other node). A single invocation therefore covers one node and all its visible GPUs; it does
+not launch or coordinate distributed training. The existing `torchrun` path in `perfkit.bench` is for the
+isolated communication measurement, not a distributed training benchmark. `--repeat` creates separate runs
+and therefore cannot be combined with an explicit shared run ID. The per-run `system` aggregates continue to
+describe the GPU selected for the benchmark; JSONL contains separate samples for every visible GPU.
+
+The same JSONL also contains one `step_timing` event per clean step, with `run_id`, `node_id`, global `rank`,
+`local_rank`, one-based `step`, `data_ms`, `raw_step_ms`, and a UTC timestamp. A standalone process uses rank 0;
+under `torchrun`, rank identifiers come from `RANK` and `LOCAL_RANK`. `raw_step_ms` matches
+`clean.raw_step_ms` to four decimal places. `data_ms` is host wall time spent inside `Loader.next_batch()`;
+on CUDA, a nonblocking host-to-device copy may still be in flight when that call returns.
+
+Step timing events reuse the step timer's existing CUDA event pair. A background worker polls event completion with
+`Event.query()`, computes elapsed time only after completion, and writes the JSONL record. It adds no
+`cuda.synchronize()` or per-step event pair to the measured path; disk writes and event reads stay off the
+training thread. Events arrive after their GPU work completes, so the JSONL is live with a short asynchronous
+delay. Existing `clean.raw_step_ms` and `clean.data_ms` summaries are retained.
 
 | Key | nvidia-smi field | Meaning |
 |---|---|---|

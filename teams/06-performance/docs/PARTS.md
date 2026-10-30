@@ -60,7 +60,7 @@ Levels: 1 = phases, 2 = per layer and big parts (gated at 5%), 3 = inside a laye
 | CPU-GPU syncs per step | `torch.cuda.set_sync_debug_mode("warn")` in trace mode: `trace.host_syncs_per_step`, `trace.sync_sites` | each one stops the CPU from queueing work ahead |
 | GPU busy % and idle gaps | profiler trace: `trace.gpu_busy_pct` | shows the GPU waiting for the CPU |
 | Kernel launches per step | profiler trace: `trace.kernels_per_step`, `trace.top_ops` | launch-bound vs compute-bound |
-| Peak memory | `torch.cuda` memory stats: `memory.peak_allocated_gb`, `peak_reserved_gb` (allocator churn: planned) | batch-size limits, reversible savings |
+| Peak memory | `torch.cuda` memory stats: `memory.peak_allocated_gb`, `peak_reserved_gb` (GiB; `memory.gpu` identifies device) | batch-size limits, reversible savings |
 | GPU utilization, clocks, temperature, power, slowdown reasons | `nvidia-smi` sampled through the clean steps (`GpuSampler`): `system`; one-off samples in `meta.telemetry` | explains 5% misses on shared GPUs |
 
 ## 4. Weeks 2 to 4 (plan the names and switches now, code later)

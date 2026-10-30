@@ -10,7 +10,7 @@ Week-1 performance work for the lab model: a timing harness that times every par
 a correctness framework that proves fast code gives the right result, and the first baseline.
 Everything is driven by config: a new model is a new YAML file in `configs/`, not new code.
 
-## The lab model (`configs/lab_small.yaml`)
+## The lab model (`configs/base.yaml`)
 
 | Part | Setting |
 |---|---|
@@ -35,10 +35,10 @@ Everything is driven by config: a new model is a new YAML file in `configs/`, no
 ## Folder layout
 
 ```
-configs/       base.yaml (every setting; plain NanoGPT on its own), lab_small.yaml, tiny_cpu.yaml
+configs/       base.yaml (every setting; the default config of bench, smoke and test_model.py), tiny_cpu.yaml
 models/        config.py, gpt.py, ke1.py, moe.py, reversible.py, optim.py
 dataio/        tokenizer.py (pinned BrahmicTokenizer-131K), prepare_fineweb.py, loader.py
-perfkit/       regions.py, timer.py, bench.py, parts.py, metrics.py, report.py, roofline.py, schema.py, smoke.py
+perfkit/       regions.py, timer.py, bench.py, parts.py, metrics.py, events.py, report.py, roofline.py, schema.py, smoke.py
 correctness/   framework.py, conftest.py and the test files
 results/       README.md, baseline_v0.md, slowest5_v0.md, runs/ (run JSON + Markdown, part traces)
 docs/          PLAN.md (interfaces, what is done and left), PARTS.md (every part we time),
@@ -68,6 +68,39 @@ docs/          PLAN.md (interfaces, what is done and left), PARTS.md (every part
 
 The full table is in [`docs/PLAN.md`](docs/PLAN.md) section 3. Every part we time is in [`docs/PARTS.md`](docs/PARTS.md).
 
+## Quick start (main steps)
+
+Every command runs from `teams/06-performance/` and reads `configs/base.yaml`: change the model, batch, sequence
+length or bench settings there, or add `key=value` overrides (an unknown key is an error). On Colab, put `!` in
+front of each command; torch is already installed there, do not reinstall it.
+
+```bash
+# 1. Install (laptop: inside a venv)
+pip install -q tokenizers datasets pyyaml pytest numpy
+
+# 2. Correctness: only the tests for what base.yaml selects (add --all-configs to run every test, e.g. Gate 1)
+python -m pytest correctness -q -rs
+
+# 3. Real data: FineWeb sample-10BT retokenized with BrahmicTokenizer-131K (val + 1 train shard, 1M tokens each)
+python -m dataio.prepare_fineweb
+
+# 4. Smoke test: does base.yaml build, train and run at a sane speed?
+python -m perfkit.smoke
+
+# 5. Benchmark + 5% repeat check, normal run (base.yaml as it is): two runs, exit 0 = PASS, 2 = a part outside
+python -m perfkit.bench --level 3 --repeat 2 --tag normal_rep; echo "exit=$?"
+
+# 6. Benchmark + 5% repeat check, MTP run (second head on token t+2)
+python -m perfkit.bench --level 3 --repeat 2 --tag mtp_rep model.mtp=true; echo "exit=$?"
+
+# 7. Colab only: download the results
+# !zip -qr /content/results.zip results/runs
+# from google.colab import files; files.download("/content/results.zip")
+```
+
+Exit codes: 0 ok, 2 a part outside the 5% rule (see "The 5% rule" below), 3 out of GPU memory (add
+`model.ce_impl=chunked` or lower `run.batch_size`), 4 no data (run step 3). The sections below explain each step.
+
 ## How to run
 
 Every command runs from `teams/06-performance/`. Give the GPU name with every timing you share.
@@ -86,7 +119,8 @@ then `pip install -r perfkit/requirements.txt`. Colab (torch is already installe
 **3. Tests** (CPU is fine)
 
 ```bash
-python -m pytest correctness -q -rs              # all pass; skips are listed with their reason
+python -m pytest correctness -q -rs              # only what configs/base.yaml uses (the rest is deselected)
+python -m pytest correctness -q -rs --all-configs  # every test, every choice (Gate 1)
 ```
 
 A test that hits an unfinished stub is SKIPPED and named; at Gate 1 no stub skip may be left. Some tests skip
@@ -116,14 +150,14 @@ real Brahmic vocabulary and KE byte table, including special tokens and raw part
 **5. Smoke test the model** (not the baseline: Gate 1 numbers come from `perfkit.bench` on committed code)
 
 ```bash
-python -m perfkit.smoke                                      # lab model: configs/lab_small.yaml
+python -m perfkit.smoke                                      # configs/base.yaml
 python -m perfkit.smoke --config configs/base.yaml          # plain NanoGPT for comparison
 python -m perfkit.smoke --config configs/tiny_cpu.yaml       # laptop, seconds; numbers mean nothing
-python -m perfkit.smoke model.ce_impl=chunked                # if out of memory; then lower --batch (T4 default is 8)
+python -m perfkit.smoke model.ce_impl=chunked                # if out of memory; then lower run.batch_size (8 on a T4)
 python -m perfkit.smoke --steps 500 --warmup 0               # longer training run (every step is a real train step)
 ```
 
-Precision and batch come from the GPU: bf16 and B=32 on A100 / L4 / H100, fp16 and B=8 on T4 / P100 / V100 (the bench uses the same rule through `run.batch_size: auto`).
+Device, precision, batch and step counts come from the config only (`run.device`, `run.dtype`, `run.batch_size`, `smoke.warmup`, `smoke.steps`), the same keys bench reads. `run.batch_size` is 32 in `base.yaml`; set 8 on a T4 / P100 / V100. `run.dtype: bf16` on a GPU without native bf16 runs fp16 + GradScaler.
 `key=value` overrides work for any key of `configs/base.yaml`. A good run: reconstruction error below
 1e-3 (`OK`), loss starting at about ln(131072) = 11.78 and falling, p10 / p90 within a few % of the median,
 `all weights finite: True`.
@@ -149,40 +183,32 @@ Timing results for the Brahmic vocabulary: [`results/baseline_v0.md`](results/ba
 
 ```bash
 python -m perfkit.bench --config configs/tiny_cpu.yaml                      # laptop: proves it runs; writes to ~/.cache/era-perf/runs-smoke/
-python -m perfkit.bench --config configs/lab_small.yaml --level 3 --tag a                              # first baseline run
-python -m perfkit.bench --config configs/lab_small.yaml --level 3 --tag b --against results/runs/a.json # 5% check
-torchrun --nproc_per_node 2 -m perfkit.bench --config configs/lab_small.yaml --modes comm               # 2+ GPUs
+python -m perfkit.bench --config configs/base.yaml --level 3 --tag a                              # first baseline run
+python -m perfkit.bench --config configs/base.yaml --level 3 --tag b --against results/runs/a.json # 5% check
+torchrun --nproc_per_node 2 -m perfkit.bench --config configs/base.yaml --modes comm               # 2+ GPUs
 ```
 
 A/B of an implementation switch (`model.moe.dispatch`, `optim.muon_impl`): same commit, GPU, batch, dtype and data, only the switch changes. `--against` accepts the switch, still checks everything else, and labels the verdict `(A/B)`: a gated part outside 5% there is the speedup being measured, not a failed check.
 
 ```bash
-python -m perfkit.bench --config configs/lab_small.yaml --modes clean,layer --level 3 --tag moe_loop model.moe.dispatch=loop
-python -m perfkit.bench --config configs/lab_small.yaml --modes clean,layer --level 3 --tag moe_sorted --against results/runs/moe_loop.json model.moe.dispatch=sorted
-python -m perfkit.bench --config configs/lab_small.yaml --modes clean,layer --level 3 --tag muon_loop optim.muon_impl=loop
-python -m perfkit.bench --config configs/lab_small.yaml --modes clean,layer --level 3 --tag muon_batched --against results/runs/muon_loop.json optim.muon_impl=batched
+python -m perfkit.bench --config configs/base.yaml --modes clean,layer --level 3 --tag moe_loop model.moe.dispatch=loop
+python -m perfkit.bench --config configs/base.yaml --modes clean,layer --level 3 --tag moe_sorted --against results/runs/moe_loop.json model.moe.dispatch=sorted
+python -m perfkit.bench --config configs/base.yaml --modes clean,layer --level 3 --tag muon_loop optim.muon_impl=loop
+python -m perfkit.bench --config configs/base.yaml --modes clean,layer --level 3 --tag muon_batched --against results/runs/muon_loop.json optim.muon_impl=batched
 ```
 
 Read the clean step median, tokens/s, and the level-3 `blockN.moe.dispatch` or `opt.muon.ns` rows (information only). Keep the default `report.gate_level=2`: the 5% rule covers the step parts and whole blocks, not the parts inside a block (instructor rule 3a). Use real data: the sorted dispatch pads every expert to the busiest one, and synthetic tokens hide routing skew.
 
-**Roofline estimate** (analytical lower bounds, not measured performance):
-
-```bash
-python -m perfkit.roofline --config configs/lab_small.yaml --gpu "NVIDIA A100-SXM4-40GB" --run results/runs/baseline_v0.json
-```
-
-See [`docs/ROOFLINE.md`](docs/ROOFLINE.md) for assumptions, overrides, and cross-GPU validation guidance.
-
 The 5% rule itself is two runs of one implementation. Before switching a default, each side must pass it:
 
 ```bash
-python -m perfkit.bench --config configs/lab_small.yaml --level 3 --repeat 2 --tag moe_sorted_rep model.moe.dispatch=sorted
-python -m perfkit.bench --config configs/lab_small.yaml --level 3 --repeat 2 --tag muon_batched_rep optim.muon_impl=batched
+python -m perfkit.bench --config configs/base.yaml --level 3 --repeat 2 --tag moe_sorted_rep model.moe.dispatch=sorted
+python -m perfkit.bench --config configs/base.yaml --level 3 --repeat 2 --tag muon_batched_rep optim.muon_impl=batched
 ```
 
 Defaults (`configs/base.yaml`, `bench:`): all modes (clean, layer, trace, checkpoint, comm), 150 measured steps
-after 10 warmup, 10 checkpoint saves after one warm save that is not counted. `run.batch_size: auto` uses the
-same rule as smoke: B=32 where bf16 is native (A100, L4, H100), B=8 otherwise (T4: B=32 runs out of memory);
+after 10 warmup, 10 checkpoint saves after one warm save that is not counted. B is `run.batch_size` from the config,
+never picked from the GPU (32 in `base.yaml`; set 8 on a T4, where B=32 runs out of memory);
 the run JSON records the B it used, and `--against` refuses two runs with different B. On one GPU the all-to-all
 is not timed (its payload is recorded); time it under `torchrun` on 2+ GPUs (Kaggle T4 x2). A level-3 run takes
 about 8 minutes on an A100. Run the two baselines back to back in one session.
