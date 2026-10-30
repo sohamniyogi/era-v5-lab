@@ -47,7 +47,8 @@ teams/06-performance/
   correctness/    conftest.py, framework.py, test_framework.py,
                   test pairs: test_attention.py, test_ke.py, test_moe.py, test_reversible.py, test_ce.py, test_model.py
                   harness: test_timer.py, test_bench.py, test_parts.py, test_report.py
-                  optimizer and data: test_optimizer.py, test_tokenizer.py, test_tokenizer_optimizer.py
+                  optimizer and data: test_optimizer.py (includes tokenizer + KE integration), test_tokenizer.py
+                  metrics: test_metrics.py
   results/        README.md, baseline_v0.md, slowest5_v0.md, runs/
   docs/           PLAN.md, PARTS.md, METRICS.md
 ```
@@ -244,7 +245,7 @@ Status "Stub": the file raises `NotImplementedError`. Its docstring has the full
 | `correctness/test_reversible.py` | Custom backward vs plain autograd (MLP and MoE); inversion; bf16 reconstruction (CUDA bf16 only) | Implemented |
 | `correctness/test_ce.py` | `ce_impl=chunked` vs `torch` and a definition, with masked targets | Implemented |
 | `correctness/test_model.py` | The whole GPT (lab_small, base; fp32 and bf16) vs an fp64 model from the definitions, real Brahmic tokens | Implemented; catches 6 injected model bugs |
-| `correctness/test_optimizer.py`, `test_tokenizer.py`, `test_tokenizer_optimizer.py` | Parameter split, updates, state restore, GradScaler (CUDA); tokenizer and shard contract; tokenizer + KE + optimizer together | Implemented |
+| `correctness/test_optimizer.py`, `test_tokenizer.py`, `test_metrics.py`, `test_report.py` | Optimizer assignment, updates, state restore and FLOPs; tokenizer contract; metric formulas and GPU peaks; report 5% gate and Markdown output; real-tokenizer + KE + optimizer integration is folded into `test_optimizer.py` | Implemented; CUDA bf16 loop/batched tolerance still needs validation on target GPU |
 
 ### Gate 1
 

@@ -33,6 +33,23 @@ dtype the run used (`peak_tflops` in the run JSON). The run JSON `metrics` secti
 `mfu` and `hfu` are `null` when there is no peak. The optimizer FLOPs come from `Optimizers.flops()` in
 `models/optim.py`.
 
+## Correctness coverage
+
+`correctness/test_metrics.py` checks the FLOPs-per-token formulas, MFU/HFU conversion, and known or
+unknown GPU/dtype peak lookups. `correctness/test_optimizer.py` checks the Newton–Schulz FLOP count,
+including that AdamW-only parameters do not contribute. `correctness/test_report.py` covers the 5% gate
+and the Markdown renderers.
+
+Run these focused checks from `teams/06-performance` with:
+
+```bash
+python -m pytest correctness/test_metrics.py correctness/test_optimizer.py correctness/test_report.py -q
+```
+
+The loop-versus-batched Muon bf16 comparison in `test_optimizer.py` requires CUDA with native bf16
+support. Its current acceptance bound is `rtol=0.04, atol=0.02`; validate and record the observed error
+on the target GPU before treating that bound as empirically measured.
+
 ## Peak table (`PEAKS` in `metrics.py`)
 
 `gpu_peak(device_name)` / `peak_tflops(device_name, dtype)` walk a substring table (B200, H200,
