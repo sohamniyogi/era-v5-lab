@@ -60,7 +60,15 @@ at all, `meta.commit` is taken from the `PERF_COMMIT` environment variable (or `
 
 `perfkit.metrics.GpuSampler` runs `nvidia-smi --loop-ms=1000` in a child process while the clean steps run
 (the steps that give step time, tokens/s and MFU), so the samples describe the same steps. Each metric has
-`min`, `median`, `max`, `mean` over the samples.
+`min`, `median`, `max`, `mean` over the samples in the final JSON. The sampler also streams individual records
+to the run's `<tag>.jsonl` sidecar as they arrive. Each line is a JSON object with `schema_version`, `event`,
+UTC `timestamp`, `run_id`, `node_id`, `gpu` (`name`, local `index`, `uuid`, `pci_bus_id`), current clean `step`
+when available, raw `metrics`, and `slowdown_flags`. `mem_used_mib` remains in MiB for G8 to convert. Reading
+the JSONL does not synchronize CUDA; a separate thread consumes `nvidia-smi` output and flushes each event.
+By default each invocation gets a unique `run_id`; pass `--run-id <id>` to share an ID across coordinated G5/G6
+invocations. `--node-id` overrides the default node name (`G8_NODE_ID` or hostname). `--repeat` creates separate
+runs and therefore cannot be combined with an explicit shared run ID. The current harness samples the one GPU
+selected by that process; multi-GPU/multi-node training collection is not implemented yet.
 
 | Key | nvidia-smi field | Meaning |
 |---|---|---|

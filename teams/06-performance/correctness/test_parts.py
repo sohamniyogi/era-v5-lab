@@ -195,9 +195,13 @@ def test_sampler_end_to_end_with_a_fake_nvidia_smi(tmp_path, monkeypatch):
     smi.write_text(FAKE_SMI.format(python=sys.executable))
     smi.chmod(0o755)
     monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
-    with M.GpuSampler(torch.device("cuda"), interval_ms=20) as s:
+    records = []
+    with M.GpuSampler(torch.device("cuda"), interval_ms=20,
+                      on_sample=lambda row, step: records.append((row, step))) as s:
+        s.set_step(7)
         time.sleep(0.5)
     out = s.summary()
     assert out["samples"] >= 3 and out["metrics"]["power_w"]["median"] == 300.5
     assert out["slowdown_samples"] == 0
+    assert len(records) >= 3 and records[0][1] == 7
     assert s._proc is None                                                  # the child was stopped

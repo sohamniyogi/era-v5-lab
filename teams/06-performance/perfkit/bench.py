@@ -1,7 +1,7 @@
-"""Time each part of the training step and write the run JSON.  [implemented]
+"""Time each part of the training step and write run JSON plus live JSONL events.  [implemented]
 
     cd teams/06-performance
-    python -m perfkit.bench [--config configs/base.yaml] [--tag name] [--against run.json] [key=value ...]
+    python -m perfkit.bench [--config configs/base.yaml] [--tag name] [--run-id id] [--against run.json] [key=value ...]
 
 Examples
     python -m perfkit.bench --config configs/tiny_cpu.yaml                    # laptop: proves it runs (~30 s)
@@ -45,7 +45,7 @@ What a run does (the numbered steps of the original stub)
      parts inside a block from a level-3 pass, so the many level-3 events cannot slow the gated
      numbers. Each region keeps its level ("pass" says which pass measured it).
   7. Metrics from perfkit.metrics (the one place MFU / HFU are computed), run JSON to
-     <bench.out_dir>/<tag>.json, Markdown next to it (<tag>.md, perfkit.report.render).
+     <bench.out_dir>/<tag>.json, live JSONL events to <tag>.jsonl, Markdown next to it (<tag>.md).
      perfkit.schema.validate_run must return [] (exit code 1 otherwise).
 
 Modes (bench.modes; clean always runs: meta, config, clean and metrics are required)
@@ -88,9 +88,11 @@ import math
 import os
 import random
 import re
+import socket
 import subprocess
 import sys
 import time
+import uuid
 import warnings
 from collections import deque
 from contextlib import nullcontext
@@ -108,6 +110,7 @@ from models.config import load_config, model_config  # noqa: E402
 from models.gpt import GPT  # noqa: E402
 from models.optim import build_optimizer  # noqa: E402
 from perfkit import metrics as M  # noqa: E402
+from perfkit.events import JsonlWriter, gpu_sample_record  # noqa: E402
 from perfkit import parts as P  # noqa: E402
 from perfkit import timer as T  # noqa: E402
 from perfkit.regions import phase, point, region, use_recorder  # noqa: E402
@@ -139,6 +142,7 @@ class Setup:
     scaler: object = None
     grad_clip: float | None = None
     notes: list = field(default_factory=list)
+    sample_step_callback: object = None
 
     def autocast(self):
         amp = AMP[self.dtype]
@@ -285,7 +289,9 @@ def run_clean(s: Setup, n: int):
     data, loss = [], None
     if s.device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(s.device)
-    for _ in range(n):
+    for step in range(n):
+        if s.sample_step_callback is not None:
+            s.sample_step_callback(step + 1)
         st.start()
         d, loss = train_step(s)
         st.stop()
@@ -548,11 +554,14 @@ def run_comm(plan: dict, device: torch.device, reps: int) -> dict:
 
 # ------------------------------------------------------------------------------ metadata and metrics
 
-def run_metadata(s: Setup, config_file: str, overrides: list, tag: str) -> dict:
+def run_metadata(s: Setup, config_file: str, overrides: list, tag: str,
+                 run_id: str | None = None, node_id: str | None = None) -> dict:
     """perfkit.metrics.run_metadata (device, versions, git) plus what this run was."""
     meta = M.run_metadata(s.device)
     meta.update({
         "config_file": config_file, "overrides": overrides, "tag": tag,
+        "run_id": run_id or uuid.uuid4().hex,
+        "node_id": node_id or os.environ.get("G8_NODE_ID") or socket.gethostname(),
         "time": _dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z"),
         "dtype": s.dtype, "dtype_requested": s.cfg["run"]["dtype"], "notes": list(s.notes),
         "batch_size": s.loader.B, "seq_len": s.loader.T, "tokens_per_step": s.loader.B * s.loader.T,
@@ -687,10 +696,10 @@ def quick_compare(a: dict, b: dict, tol_pct: float, gate_level: int, abs_tol_ms:
 
 
 def free_path(out_dir: Path, tag: str) -> Path:
-    """<tag>.json, or <tag>-2.json, -3 ... when it exists: a run never overwrites another."""
+    """Choose a shared JSON/JSONL stem without overwriting either file from an earlier run."""
     path = out_dir / f"{tag}.json"
     i = 2
-    while path.exists():
+    while path.exists() or path.with_suffix(".jsonl").exists():
         path = out_dir / f"{tag}-{i}.json"
         i += 1
     return path
@@ -733,6 +742,8 @@ def parse(argv):
     ap.add_argument("--config", default=str(Path(__file__).resolve().parents[1] / "configs" / "base.yaml"),
                     help="default: configs/base.yaml")
     ap.add_argument("--tag", default=None, help="run name; default <config>_<gpu>_<time>")
+    ap.add_argument("--run-id", default=None, help="shared experiment ID; defaults to a unique ID per benchmark run")
+    ap.add_argument("--node-id", default=None, help="node identity for G8 (default: G8_NODE_ID or hostname)")
     ap.add_argument("--modes", default=None, help=f"comma list from {','.join(MODES)} (= bench.modes)")
     ap.add_argument("--level", type=int, default=None, help="1 phases, 2 layers, 3 inside layers (= bench.level)")
     ap.add_argument("--steps", type=int, default=None, help="measured steps per mode (= bench.steps)")
@@ -805,7 +816,11 @@ def run_once(a, overrides):
         print(f"[bench] {e}\n[bench] or time without the shards: add data.source=synthetic")
         return 4, None
     tag = a.tag or f"{Path(a.config).stem}_{_slug(M.device_name(device))}_{_dt.datetime.now():%Y%m%d-%H%M%S}"
-    meta = run_metadata(s, config_file, overrides, tag)
+    meta = run_metadata(s, config_file, overrides, tag, run_id=a.run_id, node_id=a.node_id)
+    out_dir = ROOT / Path(b["out_dir"]).expanduser()
+    path = free_path(out_dir, tag)
+    events_path = path.with_suffix(".jsonl")
+    meta["events_jsonl"] = _show(events_path)
     print(f"[bench] {meta['gpu']} | {s.dtype} | B={s.loader.B} T={s.loader.T} V={s.mcfg.vocab_size} | "
           f"modes {','.join(modes)} | level {b['level']} | {b['steps']} steps after {b['warmup']} warmup")
     for n in s.notes:
@@ -827,9 +842,33 @@ def run_once(a, overrides):
         tel0 = M.gpu_telemetry(device)
 
         print("[bench] clean ...", flush=True)
-        with M.GpuSampler(device) as sampler:
-            run["clean"], loss, mem = run_clean(s, b["steps"])
+        gpu = {"name": meta["gpu"], "index": meta.get("gpu_index"), "uuid": meta.get("gpu_uuid"),
+               "pci_bus_id": meta.get("gpu_pci_bus_id")}
+
+        def emit_gpu_sample(row, step):
+            reason_field = next((field for field in M.REASON_FIELDS if field in row), None)
+            reason = row.get(reason_field) if reason_field else None
+            record = gpu_sample_record(
+                run_id=meta["run_id"], node_id=meta["node_id"], gpu=gpu,
+                metrics={key: row.get(field) for field, key in M.SAMPLE_FIELDS.items()},
+                slowdown_flags=M.throttle_flags({"throttle_reasons": reason}) if reason_field else None,
+                step=step,
+                timestamp=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            )
+            event_writer.write(record)
+
+        print(f"[bench] live JSONL -> {_show(events_path)} (run_id={meta['run_id']}, node_id={meta['node_id']})",
+              flush=True)
+        with JsonlWriter(events_path) as event_writer:
+            with M.GpuSampler(device, on_sample=emit_gpu_sample) as sampler:
+                s.sample_step_callback = sampler.set_step
+                try:
+                    run["clean"], loss, mem = run_clean(s, b["steps"])
+                finally:
+                    s.sample_step_callback = None
         system = sampler.summary()
+        if sampler.callback_error:
+            warns.append(f"could not write a live GPU sample: {sampler.callback_error}")
         if system:
             run["system"] = system
             if system.get("slowdown_samples"):
@@ -898,13 +937,12 @@ def run_once(a, overrides):
     problems = validate_run(run)
 
     gate_level = cfg["report"]["gate_level"]
-    out_dir = ROOT / Path(b["out_dir"]).expanduser()                    # relative = inside teams/06-performance
-    path = free_path(out_dir, tag)
     if run.get("trace"):
         part_traces(run, path.parent / f"{path.stem}_parts", warns)
     print(summary(run, gate_level))
     path = write_run(run, out_dir, tag, path)
     print(f"\n[bench] run JSON -> {_show(path)}")
+    print(f"[bench] event log complete -> {_show(events_path)}")
     try:
         from perfkit import report
         md = path.with_suffix(".md")
@@ -982,6 +1020,8 @@ def repeat_run(argv, tag: str, against=None) -> int:
 def main(argv=None):
     """One run, or --repeat N runs compared with the first. Returns the exit code (see the module docstring)."""
     a, overrides = parse(argv)
+    if a.repeat > 1 and a.run_id:
+        raise SystemExit("--run-id is for one benchmark invocation; omit it with --repeat so each run gets a unique ID")
     if a.repeat <= 1 or int(os.environ.get("WORLD_SIZE", "1")) > 1:     # torchrun is for --modes comm only
         return run_once(a, overrides)[0]
     # The parent only starts the runs and never touches the GPU, so every run has the whole GPU to itself. (A parent

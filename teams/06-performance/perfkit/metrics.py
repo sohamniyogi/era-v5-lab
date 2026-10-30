@@ -12,8 +12,7 @@ The one place these numbers are computed: perfkit.bench calls it, and G8 gets th
     gpu_telemetry(device)          SM clock, temperature, power, throttle reasons from nvidia-smi (None off CUDA)
     telemetry_during(device, work) the same, sampled while work() keeps the GPU busy
     throttle_flags(tel)            slowdown reasons in a sample (power cap, thermal, ...), None if not reported
-    GpuSampler(device)             GPU utilization, memory, clocks, power, temperature sampled through the clean
-                                   steps (run["system"], for G8)
+    GpuSampler(device, on_sample=...) GPU samples during clean steps, streamed to JSONL and rolled up in run["system"]
 
 FLOPs per token (T = sequence length, L = layers, d = width, N_active from GPT.param_counts):
     model_flops_per_token = 6 * N_active + 12 * L * d * T      (PaLM; attention scores counted non-causal)
@@ -30,8 +29,9 @@ import os
 import platform
 import shutil
 import subprocess
-import tempfile
+import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import torch
@@ -106,7 +106,7 @@ def git_state():
     return commit, bool(status) if status is not None else None
 
 
-_SMI = "name,driver_version,pstate,clocks.sm,clocks.max.sm,clocks.mem,temperature.gpu,power.draw,power.limit"
+_SMI = "name,uuid,pci.bus_id,driver_version,pstate,clocks.sm,clocks.max.sm,clocks.mem,temperature.gpu,power.draw,power.limit"
 
 
 def _smi_select(device) -> str:
@@ -133,7 +133,7 @@ def gpu_telemetry(device) -> dict | None:
     res = {}
     for k, v in zip(_SMI.split(","), vals):
         try:
-            res[k] = v if k in ("name", "driver_version", "pstate") else float(v)
+            res[k] = v if k in ("name", "uuid", "pci.bus_id", "driver_version", "pstate") else float(v)
         except ValueError:
             res[k] = v
     for field in REASON_FIELDS:
@@ -195,19 +195,40 @@ class GpuSampler:
             run_clean(...)
         run["system"] = s.summary()        # None off CUDA or without nvidia-smi
 
-    One nvidia-smi child process in loop mode (--loop-ms) writes one sample per interval to a temp file. Nothing
-    runs in this process, so the timed steps pay only the child's own CPU (one sample a second by default).
-    summary(): min / median / max / mean of every SAMPLE_FIELDS metric, and how many samples had a slowdown
-    reason (SLOWDOWN) active, with their names.
+    One nvidia-smi child process writes samples to a reader thread. Optional on_sample callbacks can stream
+    each sample to JSONL while training continues; no CUDA synchronization is introduced. summary() still
+    returns min / median / max / mean and slowdown aggregates for the per-run JSON.
     """
 
-    def __init__(self, device, interval_ms: int = 1000):
+    def __init__(self, device, interval_ms: int = 1000, on_sample=None):
         self.device, self.interval_ms = device, interval_ms
+        self.on_sample = on_sample
         self.fields = list(SAMPLE_FIELDS)
         self.reason = None
         self.started = False
         self.rows = []
-        self._proc = self._file = None
+        self.current_step = None
+        self._proc = self._reader = None
+        self.callback_error = None
+
+    def set_step(self, step: int) -> None:
+        """Publish the current clean-step index to the asynchronous sampler, without device synchronization."""
+        self.current_step = int(step)
+
+    def _read_samples(self):
+        """Consume samples as they arrive; optional JSONL callbacks run off the timed training thread."""
+        if self._proc is None or self._proc.stdout is None:
+            return
+        for line in self._proc.stdout:
+            row = self.parse_line(line)
+            if row is None:
+                continue
+            self.rows.append(row)
+            if self.on_sample is not None:
+                try:
+                    self.on_sample(row, self.current_step)
+                except Exception as exc:  # telemetry output must not abort model timing
+                    self.callback_error = str(exc)
 
     def __enter__(self):
         if self.device.type != "cuda" or shutil.which("nvidia-smi") is None:
@@ -216,10 +237,11 @@ class GpuSampler:
         self.reason = next((f for f in REASON_FIELDS
                             if _sh(["nvidia-smi", sel, f"--query-gpu={f}", "--format=csv,noheader"])), None)
         query = self.fields + ([self.reason] if self.reason else [])
-        self._file = tempfile.TemporaryFile(mode="w+")
         self._proc = subprocess.Popen(["nvidia-smi", sel, f"--query-gpu={','.join(query)}",
                                        "--format=csv,noheader,nounits", f"--loop-ms={self.interval_ms}"],
-                                      stdout=self._file, stderr=subprocess.DEVNULL, text=True)
+                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+        self._reader = threading.Thread(target=self._read_samples, name="perfkit-gpu-sampler", daemon=True)
+        self._reader.start()
         self.started = True
         return self
 
@@ -232,10 +254,12 @@ class GpuSampler:
         except subprocess.TimeoutExpired:
             self._proc.kill()
             self._proc.wait()
-        self._file.seek(0)
-        self.rows = [r for r in map(self.parse_line, self._file.read().splitlines()) if r]
-        self._file.close()
-        self._proc = self._file = None
+        if self._reader is not None:
+            self._reader.join(timeout=5)
+        if self._proc.stdout is not None:
+            self._proc.stdout.close()
+        self._proc = None
+        self._reader = None
         return False
 
     def parse_line(self, line: str) -> dict | None:
@@ -287,8 +311,16 @@ def run_metadata(device) -> dict:
     }
     if device.type == "cuda":
         p = torch.cuda.get_device_properties(device)
+        gpu_index = device.index if device.index is not None else torch.cuda.current_device()
+        dom, bus, dv = (getattr(p, f"pci_{key}_id", None) for key in ("domain", "bus", "device"))
+        pci_bus_id = (tel or {}).get("pci.bus_id")
+        if pci_bus_id is None and all(isinstance(v, int) for v in (dom, bus, dv)):
+            pci_bus_id = f"{dom:08X}:{bus:02X}:{dv:02X}.0"
+        gpu_uuid = (tel or {}).get("uuid") or getattr(p, "uuid", None)
         meta.update(compute_capability=f"{p.major}.{p.minor}", sm_count=p.multi_processor_count,
                     gpu_mem_gb=round(p.total_memory / 2**30, 1), gpu_count=torch.cuda.device_count(),
+                    gpu_index=gpu_index, gpu_uuid=str(gpu_uuid) if gpu_uuid is not None else None,
+                    gpu_pci_bus_id=pci_bus_id,
                     telemetry_start=tel)
     return meta
 
