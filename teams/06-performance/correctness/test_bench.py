@@ -168,6 +168,15 @@ def test_run_metadata_records_the_tokenizer():
     assert meta["tokenizer"]["sha256"] == bench.TOKENIZER_SHA256
     assert meta["vocab_size"] == VOCAB and meta["lr_schedule"] == "constant"
     assert meta["batch_size"] == s.loader.B and meta["seq_len"] == s.loader.T
+    assert meta["run_id"] and meta["node_id"]
+    assert len(bench.run_metadata(s, "configs/tiny_cpu.yaml", [], "t")["run_id"]) == 32
+
+
+def test_run_id_and_node_id_can_be_set_for_g8_handover():
+    s = bench.build(tiny_cfg(), torch.device("cpu"))
+    meta = bench.run_metadata(s, "configs/tiny_cpu.yaml", [], "t", run_id="shared-exp", node_id="node-a")
+    assert meta["run_id"] == "shared-exp"
+    assert meta["node_id"] == "node-a"
 
 
 def _checked_run(**meta):
@@ -430,6 +439,12 @@ def test_parse_turns_flags_into_overrides():
     assert ov == ["run.batch_size=4", "bench.modes=[clean,layer]", "bench.level=3", "bench.steps=7", "bench.warmup=2"]
 
 
+def test_parse_accepts_g8_run_and_node_ids():
+    args, _ = bench.parse(["--config", "c.yaml", "--run-id", "shared-run", "--node-id", "worker-1"])
+    assert args.run_id == "shared-run"
+    assert args.node_id == "worker-1"
+
+
 def test_parse_accepts_overrides_on_both_sides_of_the_flags():
     _, ov = bench.parse(["--config", "c.yaml", "run.batch_size=4", "--steps", "7", "report.tol_pct=9"])
     assert ov == ["run.batch_size=4", "report.tol_pct=9", "bench.steps=7"]
@@ -460,6 +475,7 @@ def test_main_writes_a_complete_valid_run(first_run):
     run = first_run["run"]
     assert first_run["code"] == 0, "exit code 0 means validate_run found nothing missing"
     assert validate_run(run) == []
+    assert Path(run["meta"]["events_jsonl"]).exists()
     assert run["meta"]["vocab_size"] == VOCAB and run["meta"]["tokenizer"]["revision"] == bench.TOKENIZER_REVISION
     assert run["clean"]["step_ms"]["n"] == 4 and run["clean"]["step_ms"]["median"] > 0
     assert run["metrics"]["tokens_per_s"] > 0 and run["metrics"]["params_total"] >= run["metrics"]["params_active"]

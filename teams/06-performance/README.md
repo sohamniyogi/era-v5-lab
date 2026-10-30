@@ -38,7 +38,7 @@ Everything is driven by config: a new model is a new YAML file in `configs/`, no
 configs/       base.yaml (every setting; the default config of bench, smoke and test_model.py), tiny_cpu.yaml
 models/        config.py, gpt.py, ke1.py, moe.py, reversible.py, optim.py
 dataio/        tokenizer.py (pinned BrahmicTokenizer-131K), prepare_fineweb.py, loader.py
-perfkit/       regions.py, timer.py, bench.py, parts.py, metrics.py, report.py, schema.py, smoke.py
+perfkit/       regions.py, timer.py, bench.py, parts.py, metrics.py, events.py, report.py, schema.py, smoke.py
 correctness/   framework.py, conftest.py and the test files
 results/       README.md, baseline_v0.md, slowest5_v0.md, runs/ (run JSON + Markdown, part traces)
 docs/          PLAN.md (interfaces, what is done and left), PARTS.md (every part we time),

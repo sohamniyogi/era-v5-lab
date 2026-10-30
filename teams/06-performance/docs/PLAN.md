@@ -119,9 +119,10 @@ with phase("bwd.recompute"):  ...             # prefix, so recompute is not coun
 ```
 meta:      gpu, gpu_spec, torch, cuda, driver, device, commit, dirty, config_file, overrides, tag, time
            [reconstruction_err]                                  cuda / driver are None on CPU
-           [dtype, dtype_requested, notes, batch_size, seq_len, tokens_per_step, vocab_size, data_source,
+           [run_id, node_id, events_jsonl, dtype, dtype_requested, notes, batch_size, seq_len, tokens_per_step, vocab_size, data_source,
             tokenizer {name, revision, sha256, vocab_size}, lr_schedule, python, bench_version, timing,
             loss_after_first_step, loss_end, compute_capability, sm_count, gpu_mem_gb, gpu_count,
+            gpu_index, gpu_uuid, gpu_pci_bus_id,
             telemetry_start, telemetry {after_warmup, during_steps, end}]
 config:    run, data, model, optim, bench                        the full merged config
 clean:     step_ms {median,p10,p90,iqr,n}, data_ms {median,p10,p90,iqr,n}
@@ -140,6 +141,8 @@ trace:     trace_file, top_ops, gpu_busy_pct, kernels_per_step
 [system]:  source, interval_ms, during, samples,                 CUDA only, sampled through the clean steps
            metrics {gpu_util_pct, mem_util_pct, mem_used_mib, sm_clock_mhz, mem_clock_mhz, power_w, temp_c:
                     {min, median, max, mean}}  [slowdown_samples, slowdown_reasons]
+[JSONL]:  one live gpu_sample object per sample, versioned; run_id, node_id, GPU UUID/PCI bus ID,
+          timestamp, latest clean step, raw sample metrics, slowdown_flags
 metrics:   tokens_per_step, tokens_per_s, mfu, params_total, params_active, model_flops_per_token,
            peak_tflops                                           [hfu, hw_flops_per_token, model_tflops_per_s]
 [memory]:  peak_allocated_gb, peak_reserved_gb

@@ -15,7 +15,8 @@ STATS = ("median", "p10", "p90", "iqr", "n")
 # always required; "layer" and "trace" only when that mode ran, "system" only on CUDA. A key with no value
 # (cuda and driver on a CPU run) is present with value None.
 REQUIRED = {
-    "meta": ["gpu", "gpu_spec", "torch", "cuda", "driver", "device", "commit", "dirty", "config_file", "overrides", "tag", "time"],
+    "meta": ["gpu", "gpu_spec", "torch", "cuda", "driver", "device", "commit", "dirty", "config_file", "overrides", "tag", "time",
+             "run_id", "node_id", "events_jsonl"],
     "config": ["run", "data", "model", "optim", "bench"],
     "clean": [*(f"step_ms.{s}" for s in STATS), *(f"data_ms.{s}" for s in STATS)],
     "layer": ["level", "overhead_pct", "step_ms.median", "step_ms_recorder_off.median", "regions"],
@@ -81,7 +82,8 @@ def example_run() -> dict:
         "meta": {"gpu": "EXAMPLE-GPU", "gpu_spec": "A100-80GB", "torch": "2.x", "cuda": "12.x", "driver": "5xx.xx",
                  "device": "cuda",
                  "commit": "0" * 40, "dirty": False, "config_file": "configs/base.yaml",
-                 "overrides": [], "tag": "example", "time": "2026-10-25 12:00:00 IST"},
+                 "overrides": [], "tag": "example", "time": "2026-10-25 12:00:00 IST",
+                 "run_id": "example-run-id", "node_id": "example-node", "events_jsonl": "results/runs/example.jsonl"},
         "config": {"run": {"batch_size": 32, "dtype": "bf16"}, "data": {}, "model": {"n_layer": 2, "block_size": 512},
                    "optim": {"name": "muon"}, "bench": {"modes": ["clean", "layer"]},
                    "report": {"gate_level": 2, "tol_pct": 5.0, "abs_tol_ms": 0.05, "min_compare_steps": 100}},
