@@ -22,10 +22,15 @@ REQUIRED = {
     "layer": ["level", "overhead_pct", "step_ms.median", "step_ms_recorder_off.median", "regions"],
     "trace": ["trace_file", "top_ops", "gpu_busy_pct", "kernels_per_step"],
     "system": ["source", "samples", "metrics"],           # CUDA only: perfkit.metrics.GpuSampler, for G8
-    "metrics": ["tokens_per_step", "tokens_per_s", "mfu", "params_total", "params_active",
+    "metrics": ["tokens_per_step", "tokens_per_s", "mfu", "hfu", "mfu_unavailable_reason",
+                "hfu_unavailable_reason", "params_total", "params_active",
                 "model_flops_per_token", "peak_tflops"],
 }
 REGION_KEYS = ("median", "p10", "p90", "iqr", "n", "level", "calls_per_step")
+METRIC_UNAVAILABLE_REASONS = {
+    "unknown_gpu", "unsupported_dtype", "peak_tflops_unavailable", "invalid_peak_tflops",
+    "hw_flops_unavailable",
+}
 
 
 def _get(d, dotted):
@@ -54,6 +59,16 @@ def validate_run(run: dict) -> list:
                 problems.append(f"region {name!r} missing {k!r}")
         if ":" not in name and name not in ("data", "fwd", "bwd", "opt"):
             problems.append(f"region {name!r} has no phase prefix (expected e.g. 'fwd:{name}')")
+    metrics = run.get("metrics", {})
+    for metric in ("mfu", "hfu"):
+        reason_key = f"{metric}_unavailable_reason"
+        value, reason = metrics.get(metric), metrics.get(reason_key)
+        if reason is not None and reason not in METRIC_UNAVAILABLE_REASONS:
+            problems.append(f"metrics.{reason_key} has unsupported value {reason!r}")
+        if value is None and reason is None:
+            problems.append(f"metrics.{reason_key} is required when metrics.{metric} is null")
+        if value is not None and reason is not None:
+            problems.append(f"metrics.{reason_key} must be null when metrics.{metric} is available")
     return problems
 
 
@@ -91,6 +106,7 @@ def example_run() -> dict:
         "layer": {"level": 3, "overhead_pct": 0.8, "step_ms": _s(36.8), "step_ms_recorder_off": _s(36.5),
                   "regions": regions},
         "metrics": {"tokens_per_step": 16384, "tokens_per_s": 448876, "mfu": 0.031, "hfu": 0.052,
+                    "mfu_unavailable_reason": None, "hfu_unavailable_reason": None,
                     "params_total": 53_200_000, "params_active": 24_900_000,
                     "model_flops_per_token": 1.6e8, "hw_flops_per_token": 2.7e8, "peak_tflops": 312},
     }

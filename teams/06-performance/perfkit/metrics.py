@@ -7,7 +7,7 @@ The one place these numbers are computed: perfkit.bench calls it, and G8 gets th
     run_metadata(device)           the device, version and git fields of the run JSON "meta" (perfkit/schema.py)
     flops_per_token(model, T, opt_flops_per_step=0, tokens_per_step=None)
                                    model_flops_per_token, hw_flops_per_token, params_total, params_active
-    mfu(flops, tokens_per_s, peak_tflops)   {"mfu", "hfu", "model_tflops_per_s"}
+    mfu(flops, tokens_per_s, peak_tflops)   MFU/HFU and explicit unavailable-reason fields
     memory(device)                 peak allocated / reserved GB (None off CUDA)
     gpu_telemetry(device)          SM clock, temperature, power, throttle reasons from nvidia-smi (None off CUDA)
     telemetry_during(device, work) the same, sampled while work() keeps the GPU busy
@@ -26,6 +26,7 @@ Extra, still to write: goodput (time and tokens, badput buckets).
 """
 from __future__ import annotations
 
+import math
 import os
 import platform
 import shutil
@@ -74,6 +75,18 @@ def peak_tflops(device_name: str, dtype: str):
     """(peak TFLOPS for this dtype or None, gpu_spec or None)."""
     p = gpu_peak(device_name)
     return p.get(dtype), p.get("spec")
+
+
+def peak_unavailable_reason(device_name: str, dtype: str, peak: float | None = None) -> str | None:
+    """Stable reason code when no positive peak is available for an MFU/HFU denominator."""
+    if peak is not None:
+        return None if math.isfinite(peak) and peak > 0 else "invalid_peak_tflops"
+    p = gpu_peak(device_name)
+    if not p:
+        return "unknown_gpu"
+    if dtype not in p:
+        return "unsupported_dtype"
+    return "peak_tflops_unavailable"
 
 
 def device_name(device) -> str:
@@ -370,13 +383,22 @@ def flops_per_token(model, T: int, opt_flops_per_step: float = 0.0, tokens_per_s
             "params_total": total, "params_active": active}
 
 
-def mfu(flops: dict, tokens_per_s: float, peak_tflops: float | None) -> dict:
-    """flops: from flops_per_token (hw_flops_per_token optional). mfu / hfu are None without a peak."""
-    out = {"model_tflops_per_s": flops["model_flops_per_token"] * tokens_per_s / 1e12, "mfu": None, "hfu": None}
-    if peak_tflops:
-        out["mfu"] = flops["model_flops_per_token"] * tokens_per_s / (peak_tflops * 1e12)
-        if flops.get("hw_flops_per_token") is not None:
-            out["hfu"] = flops["hw_flops_per_token"] * tokens_per_s / (peak_tflops * 1e12)
+def mfu(flops: dict, tokens_per_s: float, peak_tflops: float | None,
+        peak_reason: str | None = None) -> dict:
+    """Return MFU/HFU plus separate null reasons; flops come from flops_per_token()."""
+    out = {"model_tflops_per_s": flops["model_flops_per_token"] * tokens_per_s / 1e12,
+           "mfu": None, "hfu": None,
+           "mfu_unavailable_reason": None, "hfu_unavailable_reason": None}
+    if peak_tflops is None or not math.isfinite(peak_tflops) or peak_tflops <= 0:
+        reason = peak_reason or "peak_tflops_unavailable"
+        out["mfu_unavailable_reason"] = reason
+        out["hfu_unavailable_reason"] = reason
+        return out
+    out["mfu"] = flops["model_flops_per_token"] * tokens_per_s / (peak_tflops * 1e12)
+    if flops.get("hw_flops_per_token") is not None:
+        out["hfu"] = flops["hw_flops_per_token"] * tokens_per_s / (peak_tflops * 1e12)
+    else:
+        out["hfu_unavailable_reason"] = "hw_flops_unavailable"
     return out
 
 
