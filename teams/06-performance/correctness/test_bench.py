@@ -46,12 +46,16 @@ class FakeLoader:
     """Same constructor and attributes as dataio.loader.Loader, random token ids, no tokenizer download."""
 
     def __init__(self, source, batch_size, block_size, device, data_dir=None, vocab_size=VOCAB, seed=0,
-                 split="train", tokenizer_path=None):
+                 split="train", tokenizer_path=None, prefetch=False):
         SEEN["tokenizer_path"] = tokenizer_path
         SEEN["source"] = source
         self.B, self.T, self.source, self.vocab_size = batch_size, block_size, source, vocab_size
         self.device = torch.device(device)
         self.g = torch.Generator().manual_seed(seed)
+        self.prefetch_enabled = prefetch
+
+    def prefetch(self):
+        pass
 
     def next_batch(self):
         buf = torch.randint(0, self.vocab_size, (self.B, self.T + 1), generator=self.g)

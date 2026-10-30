@@ -66,7 +66,7 @@ def main(argv=None):
         return torch.autocast(dev.type, dtype=amp) if amp is not None else nullcontext()
 
     ld = Loader(cfg["data"]["source"], B, m.block_size, dev, data_dir=cfg["data"]["dir"], vocab_size=m.vocab_size,
-                seed=run["seed"], tokenizer_path=cfg["data"]["tokenizer_path"])
+                seed=run["seed"], tokenizer_path=cfg["data"]["tokenizer_path"], prefetch=cfg["data"]["prefetch"])
     print(f"tokenizer: BrahmicTokenizer-131K | vocab {ld.vocab_size} | artifact {ld.tokenizer.path}")
     torch.manual_seed(run["seed"])
     model = GPT(m, ld.token_bytes(m.ke_max_pos) if m.embedding == "ke1" else None).to(dev)
@@ -90,6 +90,7 @@ def main(argv=None):
             opt.unscale(scaler)
         else:
             loss.backward()
+        ld.prefetch()
         torch.nn.utils.clip_grad_norm_(model.parameters(), run["grad_clip"])
         opt.set_lr(step_index, warmup + steps,
                    schedule=cfg["optim"]["schedule"],

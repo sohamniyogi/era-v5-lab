@@ -223,7 +223,8 @@ def build(cfg: dict, device: torch.device) -> Setup:
     seed_everything(run["seed"])
     dtype = choose_dtype(run["dtype"], device, notes)
     loader = Loader(data["source"], run["batch_size"], mcfg.block_size, device, data_dir=data["dir"],
-                    vocab_size=mcfg.vocab_size, seed=run["seed"], tokenizer_path=data["tokenizer_path"])
+                    vocab_size=mcfg.vocab_size, seed=run["seed"], tokenizer_path=data["tokenizer_path"],
+                    prefetch=data["prefetch"])
     schedule = cfg["optim"]["schedule"]
     if schedule != "constant":
         notes.append(f"optim.schedule={schedule} is ignored: bench times every step at the base learning rate")
@@ -243,7 +244,10 @@ def build(cfg: dict, device: torch.device) -> Setup:
 
 def train_step(s: Setup):
     """One training step. Regions cost nothing when no recorder is active (clean mode).
-    Returns (host ms of the data fetch, the loss tensor). Nothing here waits for the GPU."""
+    Returns (host ms of the data fetch, the loss tensor). Nothing here waits for the GPU.
+    With data.prefetch the next batch is prepared right after backward is queued, while the GPU still runs it
+    (the step start, where the GPU queue is empty, then only issues the copy); its host time is counted in the
+    returned data ms, so data ms stays the whole host cost of loading one batch."""
     t0 = time.perf_counter()
     with region("data", 1):
         x, y = s.loader.next_batch()
@@ -254,6 +258,11 @@ def train_step(s: Setup):
         point("__bwd_start__")
         (s.scaler.scale(loss) if s.scaler is not None else loss).backward()
         point("__bwd_end__")
+    if s.loader.prefetch_enabled:
+        t0 = time.perf_counter()
+        with phase("data"), region("prefetch", 3):
+            s.loader.prefetch()
+        data_ms += (time.perf_counter() - t0) * 1e3
     with region("opt", 1), phase("opt"):
         if s.scaler is not None:
             with region("opt.unscale", 2):

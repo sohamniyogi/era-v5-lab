@@ -13,6 +13,8 @@ data:
   source: fineweb10b    # fineweb10b (raw FineWeb retokenized with BrahmicTokenizer-131K) | synthetic
   dir: ~/.cache/era-perf/fineweb-brahmic131k
   tokenizer_path: null # null: pinned GitHub download; or source checkout/tokenizer.json
+  prefetch: true        # true: the next batch is sampled, checked and pinned after backward is queued (off the
+                        # step start); next_batch() then only issues the copy to the GPU. Same batches either way.
 
 model:                  # fields of models.config.ModelConfig, nothing else
   vocab_size: 131072
@@ -36,7 +38,8 @@ model:                  # fields of models.config.ModelConfig, nothing else
 
 optim:
   name: polar_muon_adamw  # adamw | muon | polar_muon_adamw (single-process combined Polar Express Muon + AdamW)
-  muon_impl: batched    # loop (reference) | batched (same-shaped matrices through torch.bmm)
+  muon_impl: batched    # loop (reference) | batched (same-shaped matrices at once; muon and polar_muon_adamw)
+  adamw_impl: foreach   # polar_muon_adamw only: loop (reference) | foreach (torch._foreach ops)
   lr: 0.0006
   muon_lr: 0.02
   weight_decay: 0.0
