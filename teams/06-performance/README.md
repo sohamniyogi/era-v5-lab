@@ -38,11 +38,11 @@ Everything is driven by config: a new model is a new YAML file in `configs/`, no
 configs/       base.yaml (every setting; the default config of bench, smoke and test_model.py), tiny_cpu.yaml
 models/        config.py, gpt.py, ke1.py, moe.py, reversible.py, optim.py
 dataio/        tokenizer.py (pinned BrahmicTokenizer-131K), prepare_fineweb.py, loader.py
-perfkit/       regions.py, timer.py, bench.py, parts.py, metrics.py, events.py, report.py, schema.py, smoke.py
+perfkit/       regions.py, timer.py, bench.py, parts.py, metrics.py, events.py, report.py, roofline.py, schema.py, smoke.py
 correctness/   framework.py, conftest.py and the test files
 results/       README.md, baseline_v0.md, slowest5_v0.md, runs/ (run JSON + Markdown, part traces)
 docs/          PLAN.md (interfaces, what is done and left), PARTS.md (every part we time),
-               METRICS.md (MFU / HFU and system metrics, for G8)
+               METRICS.md (MFU / HFU and system metrics, for G8), ROOFLINE.md (analytical estimator)
 ```
 
 ## Status
@@ -198,16 +198,6 @@ python -m perfkit.bench --config configs/base.yaml --modes clean,layer --level 3
 ```
 
 Read the clean step median, tokens/s, and the level-3 `blockN.moe.dispatch` or `opt.muon.ns` rows (information only). Keep the default `report.gate_level=2`: the 5% rule covers the step parts and whole blocks, not the parts inside a block (instructor rule 3a). Use real data: the sorted dispatch pads every expert to the busiest one, and synthetic tokens hide routing skew.
-
-**The 5% rule (agreed with TSAI, 30 Oct; other teams use the same check).** Two runs of the same code, GPU and
-config are compared part by part: the whole step, the step parts and whole blocks (level <= `report.gate_level`),
-checkpoint save and the measured all-to-all. A part passes when the two runs are **within 5%**
-(`report.tol_pct`; gap = slower / faster - 1) **or differ by less than 0.05 ms** (`report.abs_tol_ms`). The 0.05 ms
-floor is there because a very small part (for example `data` at 0.03 ms) can be 10% apart on timer noise alone,
-a few microseconds that the GPU timer cannot resolve. Both run times and their difference in ms are reported for
-every part, also for the parts that pass on the 0.05 ms rule (marked `ok (< 0.05 ms)`). Each part is the median
-over `bench.steps` measured steps; compare runs of at least `report.min_compare_steps` (100) steps, so that small
-parts are the median of many calls (bench warns below that).
 
 The 5% rule itself is two runs of one implementation. Before switching a default, each side must pass it:
 

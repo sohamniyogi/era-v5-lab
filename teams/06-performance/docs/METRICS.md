@@ -44,10 +44,34 @@ vendor peak was resolved), `invalid_peak_tflops` (a configured peak is not posit
 the peak-related reason; if only the hardware FLOPs are absent, MFU remains available and only HFU has a
 reason.
 
+## Correctness coverage
+
+`correctness/test_metrics.py` checks the FLOPs-per-token formulas, MFU/HFU conversion, and known or
+unknown GPU/dtype peak lookups. `correctness/test_optimizer.py` checks the Newton–Schulz FLOP count,
+including that AdamW-only parameters do not contribute. `correctness/test_report.py` covers the 5% gate
+and the Markdown renderers.
+
+Run these focused checks from `teams/06-performance` with:
+
+```bash
+python -m pytest correctness/test_metrics.py correctness/test_optimizer.py correctness/test_report.py -q
+```
+
+The loop-versus-batched Muon bf16 comparison in `test_optimizer.py` requires CUDA with native bf16
+support. Its current acceptance bound is `rtol=0.04, atol=0.02`; validate and record the observed error
+on the target GPU before treating that bound as empirically measured.
+
 ## Peak table (`PEAKS` in `metrics.py`)
 
-`gpu_peak(device_name)` / `peak_tflops(device_name, dtype)` walk a substring table (B200, H200,
-H100, A100, L40S, …). First match wins, so specific names come first.
+The lookup includes separate dense peaks for H200 NVL and H200 SXM; the specific `H200 NVL` match
+must precede `H200`. RTX 3060 BF16/FP16 uses the dense value: NVIDIA's 101 Tensor-TFLOPS figure
+includes 2:4 sparsity, so the table uses half.
+
+`test_metrics.py` checks BF16, FP16, FP32, FP8, and FP4 lookups for every listed test GPU. The current
+table defines no FP8 or FP4 peaks, so those lookups return `None` until authoritative dense values are added.
+
+`gpu_peak(device_name)` / `peak_tflops(device_name, dtype)` walk a substring table (B200, H200 NVL,
+H200, H100, A100, RTX 3060, L40S, …). First match wins, so specific names come first.
 
 - Known GPU, known dtype peak → `peak_tflops` is set; MFU/HFU can be computed.
 - Known GPU, empty peak entry (today `H100 NVL`, `A10G`), a dtype with no entry (bf16 on V100 / T4 / P100,

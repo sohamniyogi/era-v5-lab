@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import copy
 
+import pytest
+
 from perfkit import report
 from perfkit.schema import example_run
 
@@ -68,6 +70,21 @@ def test_dirty_or_unknown_tree_is_refused():
         assert not ok and any(f"dirty={dirty}" in p for p in problems)
 
 
+@pytest.mark.parametrize(
+    ("b_ms", "expected"),
+    [(104.9, True), (105.1, False), (95.3, True), (95.0, False)],
+)
+def test_compare_applies_five_percent_gate_at_boundary(b_ms, expected):
+    a, b = _pair()
+    a["clean"]["step_ms"]["median"] = 100.0
+    b["clean"]["step_ms"]["median"] = b_ms
+    rows, ok, problems = report.compare(a, b, 5.0, 2, 0.0)
+    assert problems == []
+    assert ok is expected
+    step = next(row for row in rows if row[0] == "step (clean)")
+    assert step[4] == ("ok" if expected else "FAIL")
+
+
 # ------------------------------------------------------------------------------ exact timing diagnostics in Markdown
 
 def test_render_shows_per_stage_cuda_allocation_diagnostics():
@@ -91,6 +108,12 @@ def test_render_preserves_exact_warning_text_and_no_false_ke_claim():
     md = report.render(run)
     assert "[warn] recorder overhead 3.2% > 2.0%: layer numbers are flagged" in md
     assert md.count("[warn] recorder overhead 3.2%") == 1
+    assert "# Bench report" in md
+    assert "## Step (clean)" in md
+    assert "- MFU: 3.1%  |  HFU: 5.2%" in md
+    assert "## Diagnostics" in md
+    assert "## Regions" in md and "| fwd:block0 |" in md
+    assert "## Five slowest leaf parts" in md
 
 
 # Sunil PR24 review regression: distinct pool-counter diagnostics
@@ -104,3 +127,16 @@ def test_render_flags_inner_pool_allocation_when_timer_count_is_zero():
     assert "[OK] layer: events_created_during_steps=0" in md
     assert "[WARN] layer.inner_pass.recorder_pool: events_created_while_measuring=57" in md
     assert "[warn] 57 recorder-pool CUDA events" in md
+
+
+def test_baseline_md_renders_run_metadata_comparison_and_gate_verdict():
+    a, b = _pair()
+    b["meta"]["tag"] = "candidate"
+    rows, ok, problems = report.compare(a, b, 5.0, 2, 0.0)
+    md = report.baseline_md(a, b, rows, ok, problems)
+    assert "# Baseline comparison — PASS" in md
+    assert "**GPU:** EXAMPLE-GPU (vs EXAMPLE-GPU)" in md
+    assert "**commit a:**" in md and "**commit b:**" in md
+    assert "## Comparison table" in md
+    assert "| step (clean) |" in md
+    assert "| ok |" in md

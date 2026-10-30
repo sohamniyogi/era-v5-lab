@@ -1,12 +1,16 @@
 """Optimizer parameter assignment, numerical updates, state restore, and scaler checks."""
 import copy
+import os
 import pytest
 import torch
+from torch import nn
 
 from models.config import ModelConfig
 from models.gpt import GPT
 from models.optim import (Muon, MuonAdamW, Optimizers, build_optimizer,
                           zeropower_via_newtonschulz5, zeropower_via_newtonschulz5_batched)
+from dataio.tokenizer import BrahmicTokenizer
+from models.ke1 import KroneckerEmbedding
 
 
 
@@ -145,6 +149,24 @@ def test_batched_newton_schulz_matches_per_matrix_reference(shape):
     torch.testing.assert_close(actual, expected, rtol=2e-3, atol=2e-3)
 
 
+def test_optimizer_flops_counts_newton_schulz_for_muon_matrices_only():
+    wide = torch.nn.Parameter(torch.zeros(2, 3))
+    tall = torch.nn.Parameter(torch.zeros(3, 2))
+    adamw_param = torch.nn.Parameter(torch.zeros(5, 5))
+    combined_adamw_param = torch.nn.Parameter(torch.zeros(7, 7))
+    optimizers = Optimizers([
+        ("opt.muon", Muon([wide, tall], ns_steps=3)),
+        ("opt.adamw", torch.optim.AdamW([adamw_param])),
+        ("opt.polar_muon_adamw", MuonAdamW([
+            {"params": [combined_adamw_param], "kind": "adamw", "lr": 0.001},
+            {"params": [torch.nn.Parameter(torch.zeros(2, 3))], "kind": "muon", "lr": 0.001,
+             "ns_steps": 2},
+        ])),
+    ])
+    # Each 2x3 / 3x2 NS step is 4*m^2*n + 2*m^3 = 64 FLOPs.
+    assert optimizers.flops() == 3 * 64 * 2 + 2 * 64
+
+
 @pytest.mark.parametrize("shape", [(4, 3), (3, 4)])
 def test_batched_muon_matches_loop_with_momentum_decay_and_missing_grad(shape):
     torch.manual_seed(41)
@@ -168,6 +190,33 @@ def test_batched_muon_matches_loop_with_momentum_decay_and_missing_grad(shape):
             torch.testing.assert_close(bp, lp, rtol=2e-3, atol=2e-3)
             if "buf" in loop.state.get(lp, {}):
                 torch.testing.assert_close(batched.state[bp]["buf"], loop.state[lp]["buf"], rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or not torch.cuda.is_bf16_supported(),
+    reason="CUDA bf16 comparison is intended for the GPU correctness job",
+)
+@pytest.mark.parametrize("shape", [(4, 3), (3, 4), (4, 4)])
+def test_batched_muon_matches_loop_on_cuda_bf16(shape):
+    # Batched GEMMs change bf16 accumulation order. Keep this device-specific tolerance
+    # explicit and report measured errors if the GPU correctness job exceeds it.
+    torch.manual_seed(41)
+    loop_p = torch.nn.Parameter(torch.randn(shape, device="cuda", dtype=torch.bfloat16))
+    batch_p = torch.nn.Parameter(loop_p.detach().clone())
+    kwargs = dict(lr=0.01, momentum=0.8, ns_steps=5, weight_decay=0.01)
+    loop = Muon([loop_p], impl="loop", **kwargs)
+    batched = Muon([batch_p], impl="batched", **kwargs)
+    for step in range(2):
+        grad = torch.randn(shape, device="cuda", dtype=torch.bfloat16) * (step + 1)
+        loop_p.grad = grad.clone()
+        batch_p.grad = grad.clone()
+        loop.step()
+        batched.step()
+    max_abs_error = (batch_p.float() - loop_p.float()).abs().max().item()
+    torch.testing.assert_close(
+        batch_p, loop_p, rtol=0.04, atol=0.02,
+        msg=f"CUDA bf16 Muon loop/batched exceeded tolerance; max_abs_error={max_abs_error:.6g}",
+    )
 
 
 def test_build_optimizer_selects_batched_muon_from_config():
@@ -384,3 +433,43 @@ def test_cosine_learning_rate_schedule():
     assert optimizers.named[0][1].param_groups[0]["lr"] == pytest.approx(0.2)
     optimizers.set_lr(4, 5, schedule="cosine", warmup_steps=2, min_lr_ratio=0.1)
     assert optimizers.named[0][1].param_groups[0]["lr"] == pytest.approx(0.02)
+
+
+@pytest.fixture(scope="module")
+def tokenizer():
+    return BrahmicTokenizer(os.environ.get("BRAHMIC_TOKENIZER_PATH"))
+
+
+class _TinyKeModel(nn.Module):
+    def __init__(self, token_bytes):
+        super().__init__()
+        self.embedding = KroneckerEmbedding(token_bytes, d_model=8)
+        self.blocks = nn.ModuleList([nn.Linear(8, 8, bias=False)])
+        self.norm = nn.LayerNorm(8)
+        self.head = nn.Linear(8, 1)
+
+    def forward(self, token_ids):
+        x = self.embedding(token_ids)
+        x = torch.tanh(self.blocks[0](x))
+        return self.head(self.norm(x))
+
+
+def test_real_tokenizer_ke_model_takes_optimizer_step(tokenizer):
+    token_ids = tokenizer.encode("\u092d\u093e\u0930\u0924 \u090f\u0915 \u0926\u0947\u0936 \u0939\u0948")
+    assert token_ids == [66526, 2420, 13092, 732]
+    model = _TinyKeModel(tokenizer.token_bytes())
+    opt = build_optimizer(model, {
+        "name": "muon", "lr": 0.001, "muon_lr": 0.02, "weight_decay": 0.01,
+    })
+    optimizers = dict(opt.named)
+    assert isinstance(optimizers["opt.muon"], Muon)
+    assert isinstance(optimizers["opt.adamw"], torch.optim.AdamW)
+    ids = torch.tensor([token_ids], dtype=torch.long)
+    before = model.embedding.proj.weight.detach().clone()
+    loss = model(ids).square().mean()
+    loss.backward()
+    opt.step()
+    assert torch.isfinite(loss)
+    assert model.embedding.proj.weight.grad is not None
+    assert not torch.equal(model.embedding.proj.weight, before)
+    assert all(torch.isfinite(parameter).all() for parameter in model.parameters())

@@ -193,6 +193,7 @@ while True:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="a shebang script stands in for nvidia-smi")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the end-to-end sampler uses a CUDA device")
 def test_sampler_end_to_end_with_a_fake_nvidia_smi(tmp_path, monkeypatch):
     smi = tmp_path / "nvidia-smi"
     smi.write_text(FAKE_SMI.format(python=sys.executable))
