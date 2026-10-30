@@ -30,8 +30,19 @@ HFU                = tokens_per_s * hw_flops_per_token / 1e12 / peak_tflops
 MFU uses model FLOPs; HFU uses hardware FLOPs. Both divide by the **dense** vendor peak for the
 dtype the run used (`peak_tflops` in the run JSON). The run JSON `metrics` section stores `mfu`, `hfu`,
 `model_tflops_per_s`, `model_flops_per_token`, `hw_flops_per_token`, `params_total` and `params_active`;
-`mfu` and `hfu` are `null` when there is no peak. The optimizer FLOPs come from `Optimizers.flops()` in
-`models/optim.py`.
+`mfu` and `hfu` are `null` when unavailable, with a reason recorded alongside each value. The optimizer FLOPs
+come from `Optimizers.flops()` in `models/optim.py`.
+
+`metrics.mfu` and `metrics.hfu` describe the single GPU selected by the benchmark process: the token
+throughput and peak denominator are both per GPU. They are not node-wide or whole-run aggregates. G8 can
+aggregate per-GPU values from separate benchmark processes where that is meaningful. Each metric has a
+separate reason field next to it: `mfu_unavailable_reason` and `hfu_unavailable_reason`. A reason is `null`
+when its metric is present. Current allowed reason strings are `unknown_gpu` (GPU not in `PEAKS`),
+`unsupported_dtype` (known GPU has no peak entry for the run dtype), `peak_tflops_unavailable` (no usable
+vendor peak was resolved), `invalid_peak_tflops` (a configured peak is not positive), and
+`hw_flops_unavailable` (HFU only; hardware FLOPs are absent). When no peak is available both metrics carry
+the peak-related reason; if only the hardware FLOPs are absent, MFU remains available and only HFU has a
+reason.
 
 ## Peak table (`PEAKS` in `metrics.py`)
 

@@ -575,12 +575,13 @@ def run_metadata(s: Setup, config_file: str, overrides: list, tag: str,
     return meta
 
 
-def compute_metrics(s: Setup, step_ms: float, peak) -> dict:
+def compute_metrics(s: Setup, step_ms: float, peak, peak_reason: str | None = None) -> dict:
     """Tokens/s from the clean step time; MFU and HFU from perfkit.metrics (formulas in its docstring)."""
     tokens = s.loader.B * s.loader.T
     f = M.flops_per_token(s.core, s.loader.T, s.opt.flops(), tokens)
     tps = tokens / (step_ms / 1e3)
-    return {"tokens_per_step": tokens, "tokens_per_s": tps, **f, "peak_tflops": peak, **M.mfu(f, tps, peak)}
+    return {"tokens_per_step": tokens, "tokens_per_s": tps, **f, "peak_tflops": peak,
+            **M.mfu(f, tps, peak, peak_reason)}
 
 
 # ------------------------------------------------------------------------------ output
@@ -921,10 +922,14 @@ def run_once(a, overrides):
         return 3, None
 
     peak, _ = M.peak_tflops(meta["gpu"], s.dtype)
-    peak = b["peak_tflops"] or peak
-    run["metrics"] = compute_metrics(s, run["clean"]["step_ms"]["median"], peak)
-    if peak is None and device.type == "cuda":
-        warns.append(f"no peak TFLOPS for {meta['gpu']} / {s.dtype}: MFU is empty (set bench.peak_tflops)")
+    peak = b["peak_tflops"] if b["peak_tflops"] is not None else peak
+    peak_reason = M.peak_unavailable_reason(meta["gpu"], s.dtype, peak)
+    if peak_reason == "invalid_peak_tflops":
+        peak = None
+    run["metrics"] = compute_metrics(s, run["clean"]["step_ms"]["median"], peak, peak_reason)
+    if peak_reason and device.type == "cuda":
+        warns.append(f"MFU/HFU unavailable for {meta['gpu']} / {s.dtype} ({peak_reason}); "
+                     "set bench.peak_tflops to provide a positive peak")
     # PARTS.md section 2: startup = imports done, model + optimizer built; first_step includes torch.compile /
     # autotune when they run; warmup = the remaining warmup steps. Time and token goodput are still to write.
     run["goodput"] = {"badput_s": buckets.as_dict()}
