@@ -176,3 +176,64 @@ Every Indic language is better than BrahmicTokenizer-131K.
 - **Reproduce:**
   1. `fetch_corpus.py --mb 20` (all languages), then `fetch_corpus.py --mb 60 --langs Ta,Te,Kn,Ml` into the same directory.
   2. Run the build above. Corpus hashes are in the manifest.
+
+## v2: o200k extension by usage, slots chosen on held-out text (#163)
+
+v2 keeps v1's base ids exactly: ids 0–114332, the base merges and all 356 special ids are byte-identical to v1-c1 (`train/check_ids.py`: PASS). Only the ids after the base change. They now hold an **o200k extension block** of 4,864 tokens (768 for code, 4,096 for English), plus the script blocks. FLORES and the code benchmarks were not used for any choice. The extension and every slot count were chosen on held-out FineWeb-2 / FineWeb / codeparrot text. Spec: `train/v2_spec.md`.
+
+| Tokenizer | En | Hi | Bn | Ta | Te | Kn | Ml | Mr | Gu | Pa | Or | As | Mean |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| BrahmicTokenizer-131K | 1.2352 | 1.6429 | 2.3295 | 3.1166 | 3.0292 | 3.2734 | 3.4738 | 2.5723 | 2.2748 | 2.5955 | 4.1287 | 2.7535 | 2.8355 |
+| v1-c1 | 1.2596 | 1.6284 | 2.2312 | 2.5932 | 2.5562 | 2.7472 | 3.0331 | 2.1067 | 2.2239 | 2.0137 | 2.4844 | 2.2791 | 2.3543 |
+| **v2** | **1.2470** | 1.6404 | 2.3345 | 2.8202 | 2.7985 | 3.0122 | 3.3377 | 2.1292 | 2.2848 | 2.0559 | 2.4843 | 2.3961 | **2.4813** |
+
+| Metric | v1-c1 vs BrahmicTokenizer-131K | v2 vs BrahmicTokenizer-131K |
+|---|---|---|
+| Mean Indic | −16.97% | **−12.49%** (beats it) |
+| English | +1.98% | **+0.96%** |
+| HumanEval | +0.95% | +0.61% (0.2969) |
+| MBPP | +0.97% | +0.81% (0.3221) |
+| GSM8K | +0.93% | +0.40% (0.3022) |
+
+- **What changed:** the English margin went from 0.02 to 1.04 points, and the code margins widened too. The cost is 4,864 fewer script merges: mean Indic is +5.4% vs v1-c1. Dravidian loses the most (Ta +8.8%, Te +9.5%, Kn +9.6%, Ml +10.0% vs v1-c1). Oriya does not change.
+- **Not better than the baseline on every language:** on FLORES, Bn is +0.2% and Gu +0.4% vs BrahmicTokenizer-131K (Hi −0.2%). The allocation requires every language to be no worse than the baseline on the held-out **dev** text, and that holds on dev. Raising the floor's margin after seeing FLORES would tune on the eval set, so it was left at 0. `slot_search.py --lang-floor -0.02` asks for a 2% margin: on the dev curves, it costs about 0.9 points more of mean Indic.
+- **Held-out check split** (FineWeb-2 `test` / FineWeb / codeparrot, not used for any choice). It moves the same way as FLORES, so the selection is not fitted to the dev split:
+
+| Tokenizer | En | Hi | Bn | Ta | Te | Kn | Ml | Mr | Gu | Pa | Or | As | Mean | Code |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| BrahmicTokenizer-131K | 1.2907 | 1.5834 | 2.2785 | 3.0526 | 2.9790 | 3.0159 | 3.3596 | 2.5032 | 2.1481 | 2.4996 | 3.8723 | 2.6430 | 2.7214 | 0.2456 |
+| v1-c1 | 1.3132 | 1.5717 | 2.1697 | 2.5266 | 2.5249 | 2.5592 | 2.8572 | 2.0323 | 2.0846 | 1.9057 | 2.2957 | 2.1960 | 2.2476 | 0.2491 |
+| v2 | 1.3018 | 1.5836 | 2.2706 | 2.7457 | 2.7634 | 2.8180 | 3.1384 | 2.0557 | 2.1438 | 1.9495 | 2.2956 | 2.3139 | 2.3707 | 0.2476 |
+| v1-c1 vs baseline | +1.7% | -0.7% | -4.8% | -17.2% | -15.2% | -15.1% | -15.0% | -18.8% | -3.0% | -23.8% | -40.7% | -16.9% | -17.4% | +1.4% |
+| v2 vs baseline | +0.9% | +0.0% | -0.3% | -10.1% | -7.2% | -6.6% | -6.6% | -17.9% | -0.2% | -22.0% | -40.7% | -12.4% | -12.9% | +0.8% |
+
+  (Code = codeparrot Python, tokens / char; the other columns are tokens / word.)
+
+- **How the extension was chosen** (`select_o200k_ext.py`, `slot_search.py`):
+  1. Held-out usage text (30 MB FineWeb English, 20 MB codeparrot Python) is encoded with full o200k. For each o200k token past the v1 cut (rank 114,483), the score is: count × (base tokens it saves − 1). A token counts at most 4 times per 20 KB chunk and must appear in at least 3 chunks, because one generated file pushed tokens such as `\xf` and `_guest` to the top.
+  2. English and code are ranked separately. One mixed list needed K = 6,656 for the same English result, because it kept adding code tokens after code had met its limit.
+  3. The smallest prefixes within +1.0% of the baseline on dev text: 768 code tokens and 4,096 English tokens. Each token's o200k merge parents come with it, so the block is closed under merges.
+- **How the slots were chosen:** each script was trained once with up to 1,536 extra merges. The first *n* merges of that run are exactly a run with *n* slots, which gives a dev fertility curve per language. Each script first gets enough slots that none of its languages is worse than the baseline on dev. The rest goes 128 at a time to the largest drop in dev mean Indic. Without that floor, Devanagari fell to 768 slots, and Hindi was +9% vs the baseline on FLORES. That is the same problem as the rejected split in the v1-c1 section.
+- **Trade-off on dev** (same allocation rule; the English part of the extension varies):
+
+| Extension size | Dev English vs baseline | Dev mean Indic vs baseline |
+|---|---|---|
+| 0 (v1 base only, held-out slot split) | +1.83% | −17.98% |
+| 768 (code only) | +1.83% | −17.33% |
+| 1,792 | +1.56% | −16.42% |
+| 2,816 | +1.33% | −15.42% |
+| 3,840 | +1.11% | −14.31% |
+| **4,864 (v2)** | **+0.89%** | **−13.06%** |
+
+  Each 0.1 point of English margin costs about 0.5 points of mean Indic. English gains come slowly because the missing English tokens are a long tail. With no extension at all, the held-out slot split is better than v1-c1's split chosen on FLORES (−17.98% vs −17.63% on dev).
+- **Build:**
+  - `train_bpe.py --slots train/slots_v2.json --special-layout v0 --v0-tokenizer <v0> --normalizer v1`
+  - sha256 `813dee8e93eae035c4fcbab67e27fa6471dbc819a3466dfefb68e9dd8063c939`
+  - Manifest: `train/v2_manifest.json`. The three gating verify scripts PASS, and `check_ids.py` against v1-c1 PASSES.
+  - With no `o200k_ext` key, `train_bpe.py` still rebuilds v1-c1 byte-identically (sha256 `7d2cff92…`).
+- **Reproduce:**
+  1. Fetch the v1 corpus (as in the v1-c1 section).
+  2. `fetch_heldout.py --out <heldout> --train-corpus <corpus>`. Hashes: `train/heldout_manifest.json`.
+  3. `select_o200k_ext.py --heldout <heldout> --out train/o200k_ext_v2.json`
+  4. `slot_search.py --corpus <corpus> --heldout <heldout> --brahmic <BrahmicTokenizer-131K/tokenizer.json> --work <dir>` (about 7 minutes). This writes `slots_v2.json` and the chosen `tokens` into `o200k_ext_v2.json`.
+  5. Run the build above.

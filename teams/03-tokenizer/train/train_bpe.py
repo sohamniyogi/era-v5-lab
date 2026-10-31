@@ -10,7 +10,9 @@ pre-tokenizer, GPT-2 ByteLevel).
 Id layout (from slots.json)
 ---------------------------
     [0, base)                    o200k_base tokens in rank order (English, code, ...)
-    [base, base + slots_1)       new merges for script 1 (e.g. Devanagari)
+    [base, base + ext)           optional (v2, #163): o200k tokens past the base cut,
+                                 picked by select_o200k_ext.py / slot_search.py
+    [.., .. + slots_1)           new merges for script 1 (e.g. Devanagari)
     ...                          one contiguous block per script, in slots.json order
     [vocab - special_slots, vocab)  special tokens: named ones, then <|reserved_N|>
 
@@ -25,6 +27,9 @@ Method
 1. Base. Walk o200k_base in rank order. Keep a token only if it is <= 32 bytes,
    spans at most one script, and both halves of its merge were kept. Stop at
    `base` tokens. The kept set is closed under its merges, so it is a valid BPE.
+   With "o200k_ext" in slots.json, the listed o200k tokens are appended next,
+   each merged from its own o200k halves, in o200k rank order (step 1b). The
+   base is unchanged, so its ids stay the same; "base" in slots.json pins it.
 2. Per script. Pre-tokenize the script's corpus with the o200k regex, keep only
    pre-tokens whose non-Common characters are all in that script, encode them
    with the base, and continue BPE training on those words for exactly `slots`
@@ -53,6 +58,12 @@ Usage
     python train_bpe.py --corpus /path/to/corpus --out /path/to/out --slots slots_v1.json \\
         --special-layout v0 --v0-tokenizer /path/to/v0_tokenizer.json --normalizer v1 \\
         --brahmic-dir /path/to/BrahmicTokenizer-131K
+
+    # v2 (#163): v1 base ids kept, o200k extension, slots chosen on held-out text
+    python train_bpe.py --corpus /path/to/corpus --out /path/to/out --slots slots_v2.json \\
+        --special-layout v0 --v0-tokenizer /path/to/v0_tokenizer.json --normalizer v1 \\
+        --brahmic-dir /path/to/BrahmicTokenizer-131K
+    python check_ids.py /path/to/v1/tokenizer.json /path/to/out/tokenizer.json
 
 Writes <out>/tokenizer.json and <out>/manifest.json (sha256, slot table,
 corpus hashes, verify results). Exit 1 if a verify script fails.
@@ -172,6 +183,37 @@ def build_base(size):
     if len(vocab) != size or sum(len(t) == 1 for t in vocab) != 256:
         sys.exit(f"ERROR: base has {len(vocab)} tokens, wanted {size} including all 256 bytes.")
     return vocab, merges, dict(dropped)
+
+
+def load_ext(path, k):
+    """The first k tokens of a select_o200k_ext.py list (bytes), after checking its sha256 line."""
+    data = json.loads(Path(path).read_text())
+    tokens = [bytes.fromhex(h) for h in data["tokens"]]
+    if hashlib.sha256("\n".join(data["tokens"]).encode()).hexdigest() != data["tokens_sha256"]:
+        sys.exit(f"ERROR: {path}: tokens do not match tokens_sha256.")
+    if k > len(tokens):
+        sys.exit(f"ERROR: {path} has {len(tokens)} tokens, slots_json asks for {k}.")
+    return tokens[:k], data["tokens_sha256"]
+
+
+def build_ext(vocab, tokens, first_id):
+    """Step 1b (v2, #163): append o200k tokens past the base cut, in o200k rank order.
+
+    Each token is merged from its own o200k halves, so merge priority stays o200k's.
+    `tokens` must be closed under those halves together with `vocab` (select_o200k_ext.py
+    lists ancestors first, so every prefix of its list is closed)."""
+    import tiktoken
+    ranks = tiktoken.get_encoding("o200k_base")._mergeable_ranks
+    merges = []
+    for token in sorted(tokens, key=ranks.__getitem__):
+        if token in vocab or len(token) > MAX_BYTES or len(scripts_of(token)) > 1:
+            sys.exit(f"ERROR: o200k extension token {token!r} is a duplicate or not admissible.")
+        parts = o200k_split(ranks, token, ranks[token])
+        if len(parts) != 2 or parts[0] not in vocab or parts[1] not in vocab:
+            sys.exit(f"ERROR: o200k extension token {token!r}: merge parents {parts} missing.")
+        vocab[token] = first_id + len(merges)
+        merges.append((parts[0], parts[1]))
+    return merges
 
 
 def tokenizer_json(vocab, merges, specials, pattern, normalizer=None):
@@ -367,14 +409,22 @@ def main():
     special_ids = {s["id"] if isinstance(s, dict) else s[0] for s in specials}
     # The build works on dense ids 0..n_normal-1; real_id maps them past the special ids.
     real_id = [i for i in range(vocab_size) if i not in special_ids]
-    base_size = len(real_id) - sum(s["slots"] for s in scripts.values())
-    print(f"layout: base={base_size}  scripts={sum(s['slots'] for s in scripts.values())}  "
+    ext_cfg = cfg.get("o200k_ext") or {"slots": 0}
+    base_size = len(real_id) - sum(s["slots"] for s in scripts.values()) - ext_cfg["slots"]
+    if "base" in cfg and cfg["base"] != base_size:
+        sys.exit(f"ERROR: slots give base={base_size}, but {args.slots} fixes base={cfg['base']}.")
+    print(f"layout: base={base_size}  o200k_ext={ext_cfg['slots']}  "
+          f"scripts={sum(s['slots'] for s in scripts.values())}  "
           f"specials={n_special} ({args.special_layout})  total={vocab_size}", flush=True)
 
     t0 = time.time()
     base_vocab, base_merges, dropped = build_base(base_size)
     print(f"base: {len(base_vocab)} o200k tokens, {len(base_merges)} merges, dropped {dropped} "
           f"({time.time() - t0:.0f}s)", flush=True)
+    if ext_cfg["slots"]:
+        ext_tokens, ext_sha = load_ext(Path(args.slots).parent / ext_cfg["tokens"], ext_cfg["slots"])
+        base_merges += build_ext(base_vocab, ext_tokens, base_size)
+        print(f"o200k_ext: {len(ext_tokens)} tokens past the base cut", flush=True)
 
     # Encoder for the base alone, used to segment each script's words before step 2.
     from tokenizers import Tokenizer
@@ -393,10 +443,12 @@ def main():
         return b + [{"special_ids_inside": inside}] if inside else b
 
     layout = {"base": block(0, base_size)}
+    if ext_cfg["slots"]:
+        layout["o200k_ext"] = block(base_size, base_size + ext_cfg["slots"])
     last_count = {}
     corpus_manifest_path = corpus / "corpus_manifest.json"
     corpus_manifest = json.loads(corpus_manifest_path.read_text()) if corpus_manifest_path.exists() else {}
-    next_id = base_size
+    next_id = base_size + ext_cfg["slots"]
     for script, spec in scripts.items():
         t0 = time.time()
         paths = [corpus / f"{lang}.txt" for lang in spec["langs"]]
@@ -460,6 +512,8 @@ def main():
             "reserved_special_slots": n_special - len(cfg["named_specials"])}
            if args.special_layout == "own" else {"v0_tokenizer_sha256": v0_sha, "special_tokens": n_special}),
         "base": {"source": "tiktoken o200k_base", "kept": base_size, "dropped": dropped},
+        **({"o200k_ext": {"slots": ext_cfg["slots"], "tokens": ext_cfg["tokens"], "tokens_sha256": ext_sha}}
+           if ext_cfg["slots"] else {}),
         "corpus": {lang: corpus_manifest.get(lang) for spec in scripts.values() for lang in spec["langs"]},
         "normalizer": args.normalizer,
         "slots_json_sha256": sha256_file(args.slots),
