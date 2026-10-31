@@ -16,7 +16,6 @@ Each task is a GitHub issue titled `[G3] ...`. The issue is the source of truth;
 | #127 | Rebase #126 (`train_bpe.py --special-layout v0`) on main | @sohamniyogi | waiting on rebase |
 | #128 | v1 idea 3: rebalance Dravidian merges in the retrain | @sohamniyogi | in progress |
 | #129 | v1 idea 2: NFC + Malayalam chillu normalizer | **open, claim it on the issue** | unclaimed |
-| #130 | Harness: structural-identity check Sarvam-m vs Tekken | @riyaagrahari | open |
 | #131 | COMPARE.md: v0 results table (TSAI follow-up to #107) | @HariniJasti | open |
 | #132 | Fill `g10_slot_00..63` with the G10 special-token list | @rjvim | waiting on G10 (31 Oct) |
 
@@ -27,6 +26,7 @@ Each task is a GitHub issue titled `[G3] ...`. The issue is the source of truth;
 | #72 | Baseline reproduced: BrahmicTokenizer-131K, FLORES mean fertility 2.8355 (exact match) | @HariniJasti |
 | #107 | v0: reserved special slots named (G10, lang, ctrl blocks) | @rjvim |
 | #108 | Harness, `train_bpe.py` with fixed script slots, c0 build, COMPARE.md | @sohamniyogi |
+| #147 | Sarvam-m vs Tekken structural identity: same BPE table, 6 renamed specials, ids 10-19 shifted (closes #130) | @riyaagrahari |
 
 ### Areas
 
