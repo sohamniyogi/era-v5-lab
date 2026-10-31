@@ -16,14 +16,20 @@ Pack: 500 documents, `HuggingFaceFW/fineweb-2 | ben_Beng`, 1.34 M characters. La
 
 ## About the harm tests below
 
-The Data A / Data B Bengali gold set was not yet published when I wrote this sheet. Each number below is from a
-**proxy gold set: the 314 documents of this pack that I labelled `clean`**. The proxy is partly circular: for the
+**Official gold set (31 Oct): every medicine PASSES, 0 of 238 gold documents changed or dropped.** The gold set is
+`teams/02-data-b/gold/ind-bn-fw2_gold.csv` (rebuilt in #161, unchanged from the interim set): 238 documents of this pack
+that both readers (aditeyaaitronics and I) labelled clean, with 0 disputed. It lists ids only, so I joined the text from
+the pack by `doc_id` and ran the command below on it. Because I am one of the two readers, the gold set is a subset of my
+own 314 clean rows. A second, independent reader agreed on each of these documents, so the circularity is smaller than
+with the proxy, but it is not gone. This matters most for M2 (see its warning).
+
+The proxy result is kept for comparison: **the 314 documents of this pack that I labelled `clean`**. For the
 character medicines (M2, M4, M7, M9) I used the same detector to label, so 0 % on the proxy is true by construction.
 The proxy still found real problems. A first version of M5 changed 5 % of it (FAIL), so I tightened M5. M1 first
 changed 8 proxy documents (2.5 %). All 8 were real boilerplate that I had missed, so I relabelled them as C1.
 
 **Ready for the official gold set.** The code at the end of this sheet runs the full harm test with one command and
-prints the result as a Markdown table that replaces the "Proxy gold" column below:
+prints the result as a Markdown table (the "Gold" column below):
 
 ```
 awk '/^```python$/{f=1;next} /^```$/{f=0} f' medicine.md > medicine.py
@@ -37,19 +43,19 @@ column, it keeps only Bengali rows (`--all-langs` turns this off). If the gold s
 checked. I tested the script on all four input formats, and on the whole pack as a deliberately dirty "gold" set, where
 it reports FAIL for M1, M2, M3, M4, M7, M8 and M9, as expected.
 
-| Medicine | Disease | Docs in pack | Action | Fires on pack (agrees with my labels) | Proxy gold changed / dropped (of 314) | Result |
-|---|---|---|---|---|---|---|
-| M1 | C1 boilerplate lines | 95 | fix | 44 (42) | 0 / 0 | PASS |
-| M2 | G2 lost ZWJ in র‍্যা | 50 | fix | 50 (50) | 0 / 0 | PASS on proxy, see the warning |
-| M3 | D4 MT spam sites | 36 | drop | 26 (26) | 0 / 0 | PASS |
-| M4 | A6 look-alike danda U+09F7 | 17 | fix | 11 (11) | 0 / 0 | PASS |
-| M5 | C5 keyword-stuffed lines | 11 | fix | 1 (1) | 0 / 0 | PASS, low recall |
-| M6 | F3 porn / gambling promotion | 8 | drop | 5 (5) | 0 / 0 | PASS |
-| M7 | A3 legacy-font leftovers | 7 | fix | 7 (7) | 0 / 0 | PASS |
-| M8 | C2 repeated lines | 9 | fix | 8 (7) | 1 / 0 | PASS (0.32 %) |
-| M9 | A5 two-part vowel reversed | 7 | fix | 7 (7) | 0 / 0 | PASS |
-| M10 | C3 truncated tail | 7 | fix | 5 (3) | 0 / 0 | PASS |
-| M11 | G1 detached virama | 6 | fix | 2 (2) | 0 / 0 | PASS, low recall |
+| Medicine | Disease | Docs in pack | Action | Fires on pack (agrees with my labels) | Proxy gold changed / dropped (of 314) | Gold changed / dropped (of 238) | Result |
+|---|---|---|---|---|---|---|---|
+| M1 | C1 boilerplate lines | 95 | fix | 44 (42) | 0 / 0 | 0 / 0 | PASS |
+| M2 | G2 lost ZWJ in র‍্যা | 50 | fix | 50 (50) | 0 / 0 | 0 / 0 | PASS, see the warning |
+| M3 | D4 MT spam sites | 36 | drop | 26 (26) | 0 / 0 | 0 / 0 | PASS |
+| M4 | A6 look-alike danda U+09F7 | 17 | fix | 11 (11) | 0 / 0 | 0 / 0 | PASS |
+| M5 | C5 keyword-stuffed lines | 11 | fix | 1 (1) | 0 / 0 | 0 / 0 | PASS, low recall |
+| M6 | F3 porn / gambling promotion | 8 | drop | 5 (5) | 0 / 0 | 0 / 0 | PASS |
+| M7 | A3 legacy-font leftovers | 7 | fix | 7 (7) | 0 / 0 | 0 / 0 | PASS |
+| M8 | C2 repeated lines | 9 | fix | 8 (7) | 1 / 0 | 0 / 0 | PASS (0.32 %) |
+| M9 | A5 two-part vowel reversed | 7 | fix | 7 (7) | 0 / 0 | 0 / 0 | PASS |
+| M10 | C3 truncated tail | 7 | fix | 5 (3) | 0 / 0 | 0 / 0 | PASS |
+| M11 | G1 detached virama | 6 | fix | 2 (2) | 0 / 0 | 0 / 0 | PASS, low recall |
 
 D3 (10 rows, plus 2 rows that are only an Arabic Qur'an or hadith quotation, labelled clean with a note) gets
 **no medicine**. The mixing is
@@ -69,7 +75,7 @@ medicine.
    "View this post on Instagram", "Read More", "N total views, M views today", "[hupso]", a lone "#", …) **and** the
    line is among the first 3 or last 6 lines of the document.
 3. **Action:** fix (delete the line).
-4. **Harm test:** proxy gold 0 changed, 0 dropped of 314 (0 %). PASS.
+4. **Harm test:** official gold 0 / 238 (0 %), PASS. Proxy gold 0 changed, 0 dropped of 314 (0 %). PASS.
 5. **Side effects:** a real headline that is exactly "সর্বশেষ" or "বিজ্ঞাপন" in the last 6 lines is deleted. The
    medicine does not catch furniture glued to prose ("শিরোনামOther", "সিলেট সদর Read More"), desk/initials lines
    ("জিএমএম/এএটি"), related-headline lists, or share requests written as a full sentence. Those need a list model. It
@@ -86,11 +92,14 @@ medicine.
    The rule needs the following া. Without it, native words like দারিদ্র্য and বৈচিত্র্য would also match, and they
    must not change. Words like কার্যালয় do not match because the র follows া, not a word start or a virama.
 3. **Action:** fix.
-4. **Harm test:** proxy 0 / 314 (circular, see above). **Warning:** a gold set built from the same FineWeb-2 dump
+4. **Harm test:** official gold 0 / 238 (0 %), PASS. Proxy 0 / 314 (circular, see above). **Warning:** a gold set built from the same FineWeb-2 dump
    will have the same ZWJ loss. In this pack, 10 % of documents contain the pattern. A medicine that *correctly* changes
    10 % of the gold set fails the 1 % rule as written. I recommend restoring ZWJ/ZWNJ upstream (re-extracting from the
    source HTML) and not patching documents. If it must be a medicine, the gold set must be checked for the same loss
-   first.
+   first. The official gold set confirms this: it has 0 ZWJ too. Its 0 % only shows that no gold document has the
+   loanword form M2 targets (র্যা at a word start or after a virama). 55 gold documents have র্যা inside native words
+   such as কার্যালয়, and M2 correctly leaves them alone. Every document with the loanword form was labelled G2, so it
+   could not be in the gold set.
 5. **Side effects:** a transliterated name that really is written র্যা without ZWJ (rare) gets a ZWJ. The medicine does
    not fix lost ZWNJ, which has no reliable surface pattern.
 
@@ -103,7 +112,7 @@ medicine.
    editions (`bn.mtnews24.com`, `bn.globalvoices.org`, `bn.wikipedia.org`, `bn.m.wikipedia.org`,
    `bn.ekusherbangladesh.com.bd`, …). These `bn.` subdomains of foreign sites are auto-translation farms.
 3. **Action:** drop.
-4. **Harm test:** proxy 0 / 314. PASS.
+4. **Harm test:** official gold 0 / 238 (0 %), PASS. Proxy 0 / 314. PASS.
 5. **Side effects:** a new real Bengali edition on a `bn.` host is dropped until it is added to the allow-list. It does
    not catch MT on normal hosts (enigmasoftware.com, actualidadgadget.com, drcockatiel.com). It fires on 26 of 36.
 
@@ -115,7 +124,7 @@ medicine.
    `fb97c8e54faa6ea5` "গ্রামে৷" at 176 (hex `E0 A7 B7`); `740b87d9773606f0` x27; `8d8e16b8a976243b` "উত্তর।৷" at 130.
 2. **Medicine:** `re.sub("(?<=[ঀ-৿\s])৷", "।", t)`.
 3. **Action:** fix.
-4. **Harm test:** proxy 0 / 314. PASS.
+4. **Harm test:** official gold 0 / 238 (0 %), PASS. Proxy 0 / 314. PASS.
 5. **Side effects:** a real currency numerator in old-style money notation (I found none in the pack) becomes a danda.
    U+09F7 after a digit, Latin letter or । ("BDT৷", "উত্তর।৷") is not changed. That is why it fires on 11 of
    the 13 U+09F7 documents. Assamese ৰ inside Bengali words ("গ্ৰন্থ", "চাইৰে") is
@@ -128,7 +137,7 @@ medicine.
 2. **Medicine:** delete a line with 6 or more comma pieces, an average of 6 words or fewer per piece, and one two-word
    phrase in at least half of the pieces (`_stuffed` in the code).
 3. **Action:** fix (delete the line).
-4. **Harm test:** proxy 0 / 314. PASS. A first version (single shared word, 60 %) changed 16 / 314 = 5 % (FAIL). It hit
+4. **Harm test:** official gold 0 / 238 (0 %), PASS. Proxy 0 / 314. PASS. A first version (single shared word, 60 %) changed 16 / 314 = 5 % (FAIL). It hit
    lists of names ("মোঃ …, মোঃ …") and enumerations, so I tightened it.
 5. **Side effects:** recall is low (1 of 11). Whole SEO pages and spec tables are not caught. Use M3 or a classifier
    for those.
@@ -142,7 +151,7 @@ medicine.
    `পর্ন|চোদা|ক্যাসিনো|বেটিং|বাজি ধর|জুয়া খেল|casino|betting|porn|xxx|sex video` **and** at least 1 match per 600
    characters.
 3. **Action:** drop.
-4. **Harm test:** proxy 0 / 314. PASS. The density rule keeps news about casino raids: `ce8a91b51a89e51a` has 2 hits in
+4. **Harm test:** official gold 0 / 238 (0 %), PASS. Proxy 0 / 314. PASS. The density rule keeps news about casino raids: `ce8a91b51a89e51a` has 2 hits in
    2,641 chars and is kept.
 5. **Side effects:** a long news feature about the casino crackdown with many mentions could be dropped. It does not
    catch spam appended in English to a clean article (`a041c47c2735d3f0`, cialis) or sexual-health product spam.
@@ -155,7 +164,7 @@ medicine.
    `C2 A6`); `4daaf2d1c7aea69f` "বøুপ" at 1232 (ø for ্ল); `71bb93238817a1c8` "সহÑসভাপতি" (Ñ for a dash).
 2. **Medicine:** only when the character touches a Bengali letter: æ→ু, ø→্ল, ¦→্ব, Ñ→–, Í→-.
 3. **Action:** fix.
-4. **Harm test:** proxy 0 / 314. PASS.
+4. **Harm test:** official gold 0 / 238 (0 %), PASS. Proxy 0 / 314. PASS.
 5. **Side effects:** a real Latin-1 letter right next to Bengali text (a Danish or Spanish name with no space) would be
    changed. None in the pack. Other Bijoy damage (reph in the wrong place "র্ধষণ", "রির্পোটার") is not fixed.
 
@@ -165,7 +174,7 @@ medicine.
    `7bbe5a23532255c3` "— ANI (@ANI) July 8, 2023" x3; `bd59fdf51e29e37b` a question heading x5.
 2. **Medicine:** keep the first two copies of a line longer than 8 characters and delete the third and later copies.
 3. **Action:** fix.
-4. **Harm test:** proxy 1 changed, 0 dropped of 314 (0.32 %). PASS.
+4. **Harm test:** official gold 0 / 238 (0 %), PASS. Proxy 1 changed, 0 dropped of 314 (0.32 %). PASS.
 5. **Side effects:** the one proxy change is `fb25628d14ed717a`, a poem whose refrain "পিতার আশীর্বাদ।" repeats 3
    times. The medicine cuts a real refrain. Song lyrics and poems are at risk.
 
@@ -176,7 +185,7 @@ medicine.
    `E0 A6 BE E0 A7 87`); `4c3a514616f31a33` "চৈাধুরী" (ৈ + া for ৌ) at 57; `bfb033a731f20dc9` "বিক্ষােভ" at 593.
 2. **Medicine:** `t.replace("াে", "ো").replace("ৈা", "ৌ")`.
 3. **Action:** fix.
-4. **Harm test:** proxy 0 / 314. PASS.
+4. **Harm test:** official gold 0 / 238 (0 %), PASS. Proxy 0 / 314. PASS.
 5. **Side effects:** none found. The sequence া + ে has no correct use in Bengali.
 
 ## Medicine 10: C3 truncated tail
@@ -187,7 +196,7 @@ medicine.
    characters contain no `: ঃ / - – —` (credit lines such as "সূত্র: বিবিসি" or "শিশির/এনাম/আকাশ"), cut the text after the
    last `। ? ! ৷`.
 3. **Action:** fix (trim the broken sentence; keep the document).
-4. **Harm test:** proxy 0 / 314. PASS.
+4. **Harm test:** official gold 0 / 238 (0 %), PASS. Proxy 0 / 314. PASS.
 5. **Side effects:** a last sentence that is complete but has no danda is cut (all 3 labelled cases it fires on are real
    cuts, but the same shape could be complete). It misses "[…]" endings and lists that stop without "প্রমুখ". It also trims keyword lists at the end (`7b65bbecd0338588`, `e4aa2126d8505b14`),
    which is a useful side effect.
@@ -200,7 +209,7 @@ medicine.
 2. **Medicine:** remove a space between a consonant and a following virama + consonant:
    `re.sub("(?<=[ক-হ]) (?=্[ক-হ])", "", t)`.
 3. **Action:** fix.
-4. **Harm test:** proxy 0 / 314. PASS.
+4. **Harm test:** official gold 0 / 238 (0 %), PASS. Proxy 0 / 314. PASS.
 5. **Side effects:** low recall (2 of 6). Virama + vowel ("্ি") and ি moved before its consonant need reordering, not
    joining, and a wrong join makes it worse ("ধর্মের ্র" would become "ধর্মের্র"), so those cases stay for a human.
 
