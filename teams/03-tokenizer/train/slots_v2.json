@@ -1,5 +1,5 @@
 {
-  "_comment": "v2 (#163): v1 base kept (ids 0-114332), then an o200k extension block (o200k_ext_v2.json, first `slots` tokens), then one block per script. Extension size and script slots chosen by slot_search.py on held-out FineWeb-2 / FineWeb / codeparrot dev text, not FLORES. Use with --special-layout v0 --normalizer v1.",
+  "_comment": "v2 (#163): v1 base (ids 0-114332) with unused o200k tokens swapped in place for English / code o200k tokens (o200k_v2.json), then one block per script (16,384 ids, as v1). Swap size and script slots chosen by slot_search.py on held-out FineWeb-2 / FineWeb / codeparrot dev text; FLORES is not used. Use with --special-layout v0 --normalizer v1.",
   "vocab_size": 131072,
   "special_slots": 256,
   "named_specials": [
@@ -21,57 +21,54 @@
     "<|fim_suffix|>"
   ],
   "base": 114332,
-  "o200k_ext": {
-    "slots": 4864,
-    "tokens": "o200k_ext_v2.json"
-  },
+  "o200k_swap": "o200k_v2.json",
   "scripts": {
     "Devanagari": {
-      "slots": 2816,
+      "slots": 3072,
       "langs": [
         "Hi",
         "Mr"
       ]
     },
     "Bengali": {
-      "slots": 1408,
+      "slots": 2048,
       "langs": [
         "Bn",
         "As"
       ]
     },
     "Tamil": {
-      "slots": 1024,
+      "slots": 1792,
       "langs": [
         "Ta"
       ]
     },
     "Telugu": {
-      "slots": 1024,
+      "slots": 1920,
       "langs": [
         "Te"
       ]
     },
     "Kannada": {
-      "slots": 1024,
+      "slots": 1920,
       "langs": [
         "Kn"
       ]
     },
     "Malayalam": {
-      "slots": 1024,
+      "slots": 2048,
       "langs": [
         "Ml"
       ]
     },
     "Gujarati": {
-      "slots": 768,
+      "slots": 1024,
       "langs": [
         "Gu"
       ]
     },
     "Gurmukhi": {
-      "slots": 896,
+      "slots": 1024,
       "langs": [
         "Pa"
       ]

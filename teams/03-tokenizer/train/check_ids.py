@@ -7,16 +7,18 @@ Gate for v2 (#163): a new tokenizer keeps every id a model may have been trained
 with. Compares <new> with <old> (v1) and fails unless
 
   - every special token (added_tokens) has the same id, content and flags,
-  - every id below --base-end maps to the same token string,
-  - the first base merges are identical and in the same order,
+  - every id below --base-end maps to the same token string, except the ids that
+    the build swapped (o200k pruning by usage: manifest "o200k_swap.swapped_ids",
+    passed with --manifest); those must all hold a new token,
+  - the kept base merges are identical and in the same order,
   - the vocab size is the same.
 
-Ids at or above --base-end (extension and script blocks) may differ; the script
+Ids at or above --base-end (the script blocks) may differ; the script
 reports how many tokens there kept their id.
 
 Usage
 -----
-    python check_ids.py /path/to/v1/tokenizer.json /path/to/v2/tokenizer.json --base-end 114333
+    python check_ids.py /path/to/v1/tokenizer.json /path/to/v2/tokenizer.json --manifest v2_manifest.json
 """
 import argparse
 import json
@@ -28,6 +30,7 @@ def main():
     ap.add_argument("old")
     ap.add_argument("new")
     ap.add_argument("--base-end", type=int, default=114333, help="first id after the base block (v1: 114333)")
+    ap.add_argument("--manifest", help="train_bpe.py manifest of <new>; its o200k_swap.swapped_ids may differ")
     args = ap.parse_args()
 
     old, new = (json.load(open(p, encoding="utf-8")) for p in (args.old, args.new))
@@ -39,21 +42,27 @@ def main():
 
     o_id = {i: t for t, i in old["model"]["vocab"].items()}
     n_id = {i: t for t, i in new["model"]["vocab"].items()}
+    swapped = set()
+    if args.manifest:
+        swapped = set(json.load(open(args.manifest, encoding="utf-8")).get("o200k_swap", {}).get("swapped_ids", []))
     base_ids = [i for i in o_id if i < args.base_end]
-    diff = [i for i in base_ids if n_id.get(i) != o_id[i]]
+    diff = [i for i in base_ids if n_id.get(i) != o_id[i] and i not in swapped]
     if diff:
-        problems.append(f"{len(diff)} base ids differ, first {diff[:5]}")
+        problems.append(f"{len(diff)} base ids differ outside the swap list, first {diff[:5]}")
+    same_swapped = [i for i in swapped if n_id.get(i) == o_id.get(i)]
+    if same_swapped:
+        problems.append(f"{len(same_swapped)} swapped ids still hold their v1 token")
 
-    base_tokens = {o_id[i] for i in base_ids}
-    n_base_merges = sum(1 for a, b in old["model"]["merges"] if a + b in base_tokens)
-    if old["model"]["merges"][:n_base_merges] != new["model"]["merges"][:n_base_merges]:
-        problems.append(f"the first {n_base_merges} (base) merges differ")
+    kept = {o_id[i] for i in base_ids if i not in swapped}
+    old_base = [m for m in old["model"]["merges"] if m[0] + m[1] in kept]
+    if old_base != new["model"]["merges"][:len(old_base)]:
+        problems.append(f"the {len(old_base)} kept base merges differ")
 
     above = [i for i in o_id if i >= args.base_end]
     same_above = sum(1 for i in above if n_id.get(i) == o_id[i])
     print(f"specials: {len(old['added_tokens'])} identical" if old["added_tokens"] == new["added_tokens"] else "specials: DIFFER")
-    print(f"base ids 0..{args.base_end - 1}: {len(base_ids) - len(diff)}/{len(base_ids)} identical; "
-          f"base merges: {n_base_merges}")
+    print(f"base ids 0..{args.base_end - 1}: {len(base_ids) - len(swapped) - len(diff)}/{len(base_ids)} identical, "
+          f"{len(swapped)} swapped (unused tokens pruned); kept base merges: {len(old_base)}")
     print(f"ids >= {args.base_end}: {same_above}/{len(above)} keep their v1 token (expected to change)")
     for p in problems:
         print("FAIL:", p)

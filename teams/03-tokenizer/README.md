@@ -27,7 +27,7 @@ Each task is a GitHub issue titled `[G3] ...`. The issue is the source of truth;
 | #107 | v0: reserved special slots named (G10, lang, ctrl blocks) | @rjvim |
 | #108 | Harness, `train_bpe.py` with fixed script slots, c0 build, COMPARE.md | @sohamniyogi |
 | #147 | Sarvam-m vs Tekken structural identity: same BPE table, 6 renamed specials, ids 10-19 shifted (closes #130) | @riyaagrahari |
-| this PR | v2: o200k extension by English/code usage (v1 base ids kept), slots chosen on held-out FineWeb-2; FLORES En +0.96% (was +1.98%), mean Indic −12.49% (closes #163) | @sohamniyogi |
+| this PR | v2: o200k pruning by usage (13,850 never-used base tokens swapped for English/code o200k tokens; specials and all script ids unchanged), slot split chosen on held-out FineWeb-2: held-out English +1.74% → −0.10% vs baseline, no Indic language worse than v1-c1 (closes #163) | @sohamniyogi |
 
 ### Areas
 
