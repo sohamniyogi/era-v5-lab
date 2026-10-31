@@ -107,10 +107,16 @@ extra timing events change how far the CPU runs ahead of the GPU. They are infor
 
 ## Other machines (same commit)
 
-- **Colab A100-SXM4-40GB, another session and user:** both pairs pass (28 of 28 parts).
-- **RTX 5070 Ti, Windows (WDDM, display on the same GPU), four runs:** every code part passes in all six pairs;
-  only checkpoint save fails, in the three pairs with run 2 (7.7 to 9.5%), because that run's disk write was
-  slower (and its GPU-to-CPU copy 2 ms slower). Gist linked in the PR. To be fixed in week 2.
+- **Colab A100-SXM4-40GB, a second session:** both pairs pass (28 of 28 parts).
+- **RTX 5070 Ti, Linux, commit `190693a` (same code, docstrings only), four runs per mode:** all six normal
+  and all six MTP pairs pass (28 of 28 parts, checkpoint save included, largest checkpoint gap 2.8%); step
+  59.6 ms normal, 104.4 ms MTP; MFU unavailable (`unknown_gpu`)
+  ([runs](https://gist.github.com/jssunil/0f0e289c5dca5630214d1de1da109ba9)). Correctness on the same host, with
+  the sampler test fix: 375 passed, 1 xfailed, 0 failed, 0 skipped with `--all-configs`
+  ([logs](https://gist.github.com/jssunil/0be0592d4464997a3d216fdee59fe09e)).
+- **RTX 5070 Ti, Windows (WDDM, display on the same GPU), four runs, earlier result kept for the record:** every
+  code part passes in all six pairs; only checkpoint save fails, in the three pairs with run 2 (7.7 to 9.5%),
+  because that run's disk write was slower (and its GPU-to-CPU copy 2 ms slower). Gist linked in the PR.
 - **Modal A100-80GB (SXM4 and PCIe hosts), earlier commits:** the CPU-paced parts (`opt.muon`, `fwd:embed`,
   `fwd:block0`) move between runs with the host. Week 2: capture the optimizer step as a CUDA graph so its time
   stops depending on the host CPU (`results/repeat_check_v1.md`).

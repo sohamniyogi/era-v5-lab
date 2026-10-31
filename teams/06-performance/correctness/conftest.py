@@ -10,6 +10,7 @@
     model.ffn is mlp, KE1 when model.embedding is ke2, SDPA when model.attn_impl is eager, ...) is DESELECTED:
     it does not run and is not listed, and its 1.01 drill goes with it. `pytest correctness --all-configs` runs every test (Gate 1:
     the KE, attention, MoE and reversible pairs must all pass). The rules are in config_requirements() below.
+    Exception: the strict xfail in test_ke.py (a recorded KE1 contract gap) always runs, so every run shows it.
   * At the end of the run: one row per pair, grouped by area: the worst output and gradient error, how much
     of the tolerance it uses, whether two runs were bit-identical, and PASS/FAIL with the first failure line.
 """
@@ -85,6 +86,8 @@ def _test_needs(item):
             return [("model.attn_impl", "sdpa"), ("attention", "gqa" if param != "1" else "mqa")]
         if fn == "test_eager_matches_sdpa":
             return [("model.attn_impl", "sdpa")]
+    if fn == "test_a_token_longer_than_P_is_normalised_with_L_truncated_to_P":
+        return []                    # a recorded contract gap (strict xfail): shown in every run until it is fixed
     if file in ("test_ke.py", "test_tokenizer_optimizer.py"):
         return [("model.embedding", "ke1")] + ([("model.ke_mode", param)] if param in ("dynamic", "cached") else [])
     if file == "test_ke2.py":
