@@ -1,94 +1,139 @@
-# G6 -> G8: MFU method and system metrics (week 1)
+# G6 -> G8: performance metrics and live monitoring handoff
 
-Hi G8, this is G6's handoff for the training-efficiency numbers.
+**Status:** draft for G8 interface review; not a final sign-off (open items in section 6).
+**Date:** 31 October 2026. **G6 coordination:** Siva Ajjapu.
 
-- Full write-up: `teams/06-performance/docs/METRICS.md`
-- The formulas live only in `perfkit/metrics.py`
-- Example run: `teams/06-performance/results/runs/baseline_v0.json` on branch `g6/perf-parts-system`
-  (A100-40GB, commit `f1f4986`). It will be in `g6/dev` and PR #74 shortly.
+G6 provides the benchmark timing, GPU telemetry, MFU / HFU and their output formats. G8 owns ingestion,
+aggregation and rollups, dashboards and alarms. The full method is in [`METRICS.md`](METRICS.md); this note is
+the interface G8 builds on and the evidence behind it.
 
-## 1. What to read
+## 1. What G6 delivers
 
-Every bench run writes one JSON file. The fields you can rely on are listed in `perfkit/schema.py` `REQUIRED`:
+| Deliverable | Where | Status |
+|---|---|---|
+| MFU / HFU method, system telemetry, JSONL format | `docs/METRICS.md` | Written |
+| FLOPs, MFU / HFU, GPU sampler | `perfkit/metrics.py` | Implemented |
+| Live JSONL records and their writer thread | `perfkit/events.py` | Implemented (PR #32) |
+| Run orchestration, clean-step capture | `perfkit/bench.py` | Implemented |
+| CUDA step timer (its event pair is reused for the JSONL) | `perfkit/timer.py` | Implemented |
+| Run JSON schema and reason-code checks | `perfkit/schema.py` | Implemented |
+| Tests | `correctness/test_events.py`, `test_bench.py`, `test_metrics.py` | Pass on the A100 baseline commit |
+| Baseline and five slowest parts | `results/baseline_v0.md`, `results/slowest5_v0.md` | Refreshed on `base.yaml` (commit `f1ed7f2`) |
 
-| Section | Fields |
-|---|---|
-| `metrics` | `tokens_per_step`, `tokens_per_s`, `model_flops_per_token`, `hw_flops_per_token`, `params_total`, `params_active`, `peak_tflops`, `model_tflops_per_s`, `mfu`, `hfu` |
-| `clean.step_ms` | median, p10, p90, IQR and n of the step time |
-| `system` | GPU samples taken during the measured steps (CUDA only) |
-| `meta` | GPU, commit, `dirty` flag, torch/CUDA/driver versions, config and time |
+## 2. Data interface
 
-Please use the stored values and don't recompute them. If you need a field renamed or removed, ask us first,
-because the report and other readers depend on these names. Adding new fields is fine.
+### 2.1 Run JSON (one per run, final summaries)
 
-## 2. MFU method
+- Sections: `meta`, `config`, `clean`, `metrics`; `layer` / `trace` when those modes ran; `system` and `memory`
+  on CUDA. Required fields: `perfkit/schema.py` `REQUIRED`. New fields may be added; renaming or removing one
+  is agreed with G8 first.
+- `clean.step_ms`, `clean.data_ms`: median, p10, p90, IQR, n. `clean.raw_step_ms`: every measured step.
+- `system.metrics`: min / median / max / mean over the GPU samples, **for the benchmark's GPU only**
+  (`system.gpu`), not a node aggregate.
+- `metrics.mfu`, `metrics.hfu`: **fractions** (0.076 = 7.6%) for the one GPU of the benchmark process, against
+  the dense peak for the run's dtype; not node-wide or whole-run values.
+- `memory.peak_allocated_gb`, `memory.peak_reserved_gb`: the values are **GiB** (bytes / 2^30) despite the
+  `_gb` names; `memory.unit` is `"GiB"`, `memory.gpu` names the device.
+- `meta.run_id`, `meta.node_id`, `meta.events_jsonl` link the run JSON to its live JSONL.
+
+### 2.2 Live JSONL `<tag>.jsonl` (one JSON object per line, append-only, readable during the run)
+
+| Event | Fields G8 can rely on | Meaning |
+|---|---|---|
+| `gpu_sample` | `schema_version`, `event`, UTC `timestamp`, `run_id`, `node_id`, `gpu` (`name`, `index`, `uuid`, `pci_bus_id`), `step`, `metrics`, `slowdown_flags` | About one sample per second **per visible GPU on the node** during the clean steps; `step` may be missing |
+| `step_timing` | `schema_version`, `event`, UTC `timestamp`, `run_id`, `node_id`, `rank`, `local_rank`, `step`, `data_ms`, `raw_step_ms` | One per clean step, written once its CUDA timing has resolved |
+
+Example lines (from the A100 runs; IDs shortened):
+
+```json
+{"schema_version":1,"event":"gpu_sample","timestamp":"2026-10-30T20:07:38.614Z","run_id":"example-shared-run-id","node_id":"node-a","gpu":{"name":"NVIDIA A100-SXM4-40GB","index":0,"uuid":"GPU-example-uuid","pci_bus_id":"00000000:00:04.0"},"step":1,"metrics":{"gpu_util_pct":100.0,"mem_util_pct":82.0,"mem_used_mib":8142.0,"sm_clock_mhz":1410.0,"mem_clock_mhz":1215.0,"power_w":90.33,"temp_c":39.0},"slowdown_flags":[]}
+{"schema_version":1,"event":"step_timing","timestamp":"2026-10-30T20:07:38.632Z","run_id":"example-shared-run-id","node_id":"node-a","rank":0,"local_rank":0,"step":1,"data_ms":0.7371,"raw_step_ms":49.3118}
+```
+
+### 2.3 Rules for reading the data
+
+- **GPU identity:** use `gpu.uuid`. On Modal, `gpu.pci_bus_id` can be `"[Unknown Error]"`: treat it as missing,
+  never as a shared identity. Node ID and local index are supporting context.
+- **Join on keys, not times:** `timestamp` is when a record was written, and a `step_timing` record arrives after
+  its GPU work finishes. Join on `run_id` / `node_id` / `rank` / `step`.
+- **Samples are not steps:** `gpu_sample` intervals are approximate; a short run has only a few (5 in the
+  100-step baseline run).
+- **`data_ms` is host time:** `Loader.next_batch()` plus `Loader.prefetch()` after backward (prefetch is on by
+  default on `g6/dev`). It is not the GPU's wait for data; the copy may still be in flight.
+- **`raw_step_ms` adds no sync:** it reuses the step timer's CUDA event pair; a worker thread polls
+  `Event.query()` and writes the record. No timing events are created inside measured steps.
+- **Missing is not zero:** a `null` MFU / HFU is missing. Do not average MFU / HFU across GPUs or runs without
+  an agreed rule.
+- **Units:** `mem_used_mib` stays MiB; G8 converts to bytes. G8 owns the N-second rollups.
+
+### 2.4 Dashboard rules
+
+- Flag runs with `meta.dirty = true`, or leave them out of baselines.
+- Flag runs with any `system.slowdown_samples`: such a run may miss the 5% check.
+- Show the GPU name and the commit next to every number.
+- Plot `trace.gpu_busy_pct` for real GPU utilization: `gpu_util_pct` only means "at least one kernel ran"
+  (baseline: 100% from nvidia-smi, 50% busy in the trace).
+
+## 3. MFU / HFU
 
 ```text
 model_flops_per_token = 6 * N_active + 12 * L * d * T
-hw_flops_per_token    = model + 2 extra stack forwards (reversible: invert + recompute)
-                        + 2 * head (only when the loss is chunked)
-                        + Muon Newton-Schulz FLOPs per step / tokens per step
 MFU = tokens_per_s * model_flops_per_token / (peak_tflops * 1e12)
-HFU = same with hw_flops_per_token
+HFU = tokens_per_s * hw_flops_per_token    / (peak_tflops * 1e12)
 ```
 
-`T` = sequence length, `L` = layers, `d` = width.
+- `N_active` from `GPT.param_counts()`: the matmul weights one token passes through (routed experts: only the
+  selected ones; the MTP head when `model.mtp=true`). `hw_flops_per_token` adds the reversible stack's two extra
+  forwards, the chunked head's recompute and the optimizer's Newton-Schulz work. Exact method: `METRICS.md`.
+- **Worked example** (baseline, A100-SXM4-40GB, bf16 peak 312 TFLOPS, B=16, T=256): 247 MFLOP per token at 95,459
+  tokens/s is 23.6 TFLOPS: MFU 7.6%, HFU 8.4%. MTP: 448 MFLOP per token, MFU 8.6%, HFU 9.1%.
+- **G5:** G5's harness computes every expert before selecting the top-k, so G6's active-expert FLOPs do not
+  describe it. G5 supplies its own executed-FLOPs estimate and agrees comparability with G8 before cross-team
+  reporting; the same MFU / HFU formulas then apply.
 
-Conventions:
+When `mfu` or `hfu` is `null`, its reason field (`mfu_unavailable_reason`, `hfu_unavailable_reason`) is one of:
 
-- PaLM / torchtitan style. Attention scores are counted non-causal.
-- `N_active` counts only matmul weights a token passes through: attention, the router, the shared expert
-  plus the top-2 experts, the KE projection and the LM head. It does not count lookup tables, norms or biases.
-- The peak is the dense vendor peak for the run's dtype, with no sparsity, taken from the `PEAKS` table
-  in `metrics.py`.
-- `tokens_per_s` = tokens per step / median clean step time. The step includes loading data.
-- HFU also counts recompute and optimizer FLOPs, so it shows what the hardware actually computed.
-
-Worked example (baseline_v0):
-
-| | |
-|---|---:|
-| N_active | 51,300,352 |
-| 6 * N_active | 307.8M |
-| Attention term (12 * L * d * T) | 14.2M |
-| model_flops_per_token | 321,957,888 |
-| tokens_per_s | 32,340 |
-| model TFLOP/s | 10.41 |
-| Peak (A100 bf16 dense) | 312 TFLOPS |
-| MFU | 3.34% |
-| HFU | 4.25% |
-
-Unknown GPU or dtype: `peak_tflops`, `mfu` and `hfu` are `null`. Show them as empty, never as 0.
-
-## 3. System metrics (`run["system"]`)
-
-These come from `nvidia-smi --loop-ms=1000` running during the measured steps (77 samples in the baseline).
-Each metric has min, median, max and mean.
-
-| Key | Meaning |
+| Code | Applies to |
 |---|---|
-| `gpu_util_pct` | % of the sample period in which at least one kernel ran |
-| `mem_util_pct` | % of the sample period in which device memory was read or written |
-| `mem_used_mib` | device memory in use, all processes |
-| `sm_clock_mhz`, `mem_clock_mhz` | clocks |
-| `power_w`, `temp_c` | board power and GPU temperature |
-| `slowdown_samples`, `slowdown_reasons` | samples with a power cap, thermal or hardware slowdown, and which ones |
+| `unknown_gpu` | MFU and HFU (example: RTX 5070 Ti, not in the peak table) |
+| `unsupported_dtype` | MFU and HFU |
+| `peak_tflops_unavailable` | MFU and HFU |
+| `invalid_peak_tflops` | MFU and HFU |
+| `hw_flops_unavailable` | HFU only |
 
-Warning: `gpu_util_pct` only means "at least one kernel was running". It does not mean the SMs were busy.
-The baseline shows 59% from nvidia-smi but only 24.9% GPU-busy in the trace (`trace.gpu_busy_pct`).
-Plot `gpu_busy_pct` for real utilization.
+The reason is `null` when the metric is present.
 
-## 4. Rules for G8 dashboards
+## 4. Run identity and scope
 
-- Flag runs where `meta.dirty = true`, or leave them out of baselines.
-- Flag runs with any `slowdown_samples`.
-- Always show the GPU name and commit next to a number.
+- Each bench invocation generates its own `meta.run_id`. `--run-id <id>` sets a shared ID for coordinated runs;
+  G5 must accept and write the **same** ID itself (G6 does not send it).
+- `--repeat N` gives each run its own ID and refuses a shared `--run-id`: repeats are separate measurements.
+- One collector covers one node and all its visible GPUs. For several nodes: one collector per node, the
+  **same** run ID, **different** node IDs (`--node-id`), and separate tags or output folders.
+- The `torchrun` path of bench is the isolated all-to-all measurement, not distributed-training monitoring.
+- Evidence so far is single-GPU (A100); no multi-node end-to-end test is claimed.
 
-## 5. Not done yet
+## 5. Evidence
 
-Goodput, HBM GB/s for the roofline, and multi-GPU runs. For now the numbers are for one GPU.
+| Evidence | Result | Meaning |
+|---|---|---|
+| G6 final run, Colab A100-SXM4-40GB, commit `f1ed7f2` ([gist](https://gist.github.com/vaibh27/574990425455e4a9cb64822f14e3d85b)) | `pytest --all-configs`: 375 passed, 1 xfailed, 0 skipped. Normal and MTP pairs at 100 steps: PASS, 28 of 28 gated parts each; layer-recorder overhead 0.41% / 0.25%; 1 host sync per step | The refreshed baseline; run JSONs, JSONL and logs in the gist |
+| Raj, Colab A100-SXM4-40GB, same commit | 227 passed, 12 of 12 pairs; normal pair PASS 28 of 28 (`data` by the 0.05 ms rule); MTP pair PASS at 50 steps (below the 100-step minimum) | A second session and user agree |
+| Sunil, A/B on Modal A100-40GB, four alternating runs per version ([PR #30 comment](https://github.com/vaibh27/era-v5-lab/pull/30#issuecomment-6522615585), [gist](https://gist.github.com/jssunil/43a985d359683773d98a024df501bc12)) | Median 82.60 ms without telemetry, 79.75 ms with; 0 timing events created during steps in 8 runs; 100 `step_timing` and 9 `gpu_sample` records per run, `raw_step_ms` matching the JSON | No telemetry overhead above about 5% (the test's resolution); live records consistent with the summary |
+| Sunil, RTX 5070 Ti (Windows), commit `f1ed7f2`, four runs ([gist](https://gist.github.com/jssunil/a8180d70598e5a62d7534d252b5cdc08)) | Every code part passes in all six pairs; only checkpoint save fails (7.7 to 9.5%, in the pairs with the run whose disk write was slower) | Repeatability off Colab is a week-2 item (`results/repeat_check_v1.md`) |
+| Sunil, earlier A100 / H100 / 5070 Ti review ([PR #29 comment](https://github.com/vaibh27/era-v5-lab/pull/29#issuecomment-6520549948)) | Some pairs failed the 5% / 0.05 ms rule on earlier commits | Same week-2 item |
+| H200 validation in upstream [PR #135](https://github.com/theschoolofai/era-v5-lab/pull/135) (closed without merge) | 274 passed, 1 xfailed; 22 of 22 CUDA timer tests; 2x H200 NCCL run; 24 of 33 gated parts failed the repeat check, 433 host syncs per step | An earlier `lab_small` configuration (MoE loop dispatch); the current model has 1 host sync per step |
 
-## Questions for G8
+## 6. Open: G8 to confirm
 
-- Which format do you ingest: the JSON as it is, or CSV/Parquet?
-- Do you need any field we haven't listed?
+1. The `gpu_sample` and `step_timing` shapes and `schema_version: 1` are ingestible by G8's live alarms.
+2. `gpu.uuid` is the GPU identity; `"[Unknown Error]"` in `pci_bus_id` is treated as missing.
+3. MFU / HFU as fractions, per selected GPU, `null` = missing, and the reason codes, as in section 3.
+4. G8 owns the N-second rollups and the MiB-to-bytes conversion.
+5. The shared `run_id` + one collector per node convention is suitable (pending G5 adopting `--run-id`).
+6. **MFU and KE2:** `6 * N_active` counts the KE2 projection (256 x 8192 = 2.1M parameters) as a dense matmul,
+   but KE2 runs as an `embedding_bag`: about 12.6 of the 247 MFLOP per token, so MFU reads about 5% high. Count
+   it as a matmul (today), at its real cost, or leave embeddings out of N (the usual PaLM convention)?
+7. Format: does G8 ingest the run JSON and JSONL as they are, or need CSV / Parquet? Any missing field?
+
+Not done yet on the G6 side: time and token goodput, measured HBM bandwidth for the roofline, multi-GPU runs.
