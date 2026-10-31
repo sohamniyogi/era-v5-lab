@@ -17,7 +17,6 @@ Each task is a GitHub issue titled `[G3] ...`. The issue is the source of truth;
 | #128 | v1 idea 3: rebalance Dravidian merges in the retrain | @sohamniyogi | in progress |
 | #129 | v1 idea 2: NFC + Malayalam chillu normalizer | **open, claim it on the issue** | unclaimed |
 | #131 | COMPARE.md: v0 results table (TSAI follow-up to #107) | @HariniJasti | open |
-| #132 | Fill `g10_slot_00..63` with the G10 special-token list | @rjvim | waiting on G10 (31 Oct) |
 
 ### Done
 
@@ -27,7 +26,8 @@ Each task is a GitHub issue titled `[G3] ...`. The issue is the source of truth;
 | #107 | v0: reserved special slots named (G10, lang, ctrl blocks) | @rjvim |
 | #108 | Harness, `train_bpe.py` with fixed script slots, c0 build, COMPARE.md | @sohamniyogi |
 | #147 | Sarvam-m vs Tekken structural identity: same BPE table, 6 renamed specials, ids 10-19 shifted (closes #130) | @riyaagrahari |
-| this PR | v2: o200k pruning by usage (13,850 never-used base tokens swapped for English/code o200k tokens; specials and all script ids unchanged), slot split chosen on held-out FineWeb-2: held-out English +1.74% → −0.10% vs baseline, no Indic language worse than v1-c1 (closes #163) | @sohamniyogi |
+| #166 | v2: o200k pruning by usage (13,850 never-used base tokens swapped for English/code o200k tokens; specials and all script ids unchanged), slot split chosen on held-out FineWeb-2: held-out English +1.74% → −0.10% vs baseline, no Indic language worse than v1-c1 (closes #163) | @sohamniyogi |
+| this PR | v0.1: G10 ChatML v0 markers, `g10_slot_00..04` renamed in place to `<|endoftext|>`, `<|think|>`, `<|/think|>`, `<|/tool_call|>`, `<|/tool_result|>`; ids and `special: true` unchanged, sha256 `a33c9907…e578` (closes #132) | @sohamniyogi |
 
 ### Areas
 
@@ -48,7 +48,7 @@ Each task is a GitHub issue titled `[G3] ...`. The issue is the source of truth;
 
 ### Dates (IST)
 
-- **Sat 31 Oct:** G10 sends the final special-token list (#132).
+- **Sat 31 Oct:** G10 special-token list received; v0.1 built (#132).
 - **Sat 31 Oct, 23:59:** diagnosis due for everyone (all rows + medicine sheet).
 
 ### Keeping this current
