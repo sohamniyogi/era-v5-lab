@@ -5,7 +5,7 @@ kernel-launch lower bounds. It is for forming profiling hypotheses, not replacin
 regions. The byte and launch counts are analytical approximations; validate them on each GPU.
 
 Example (from teams/06-performance):
-    python -m perfkit.roofline --config configs/lab_small.yaml --gpu "NVIDIA A100-SXM4-40GB" \
+    python -m perfkit.roofline --config configs/base.yaml --gpu "NVIDIA A100-SXM4-40GB" \
         --run results/runs/baseline_v0.json
 """
 from __future__ import annotations

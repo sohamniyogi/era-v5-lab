@@ -1,6 +1,6 @@
 """Top-k sparse Mixture of Experts.  [implemented: MVP]
 
-Lab setting: 1 shared expert (always on) + top-2 routed of 8 (configs/lab_small.yaml).
+Lab setting (model.ffn=moe in configs/base.yaml): 1 shared expert (always on) + top-2 routed of 8.
 
   * SparseMoE(dim, num_experts=8, top_k=2, expert_hidden=None, num_shared=0, bias_gamma=0.01,
               dispatch="loop", name="moe", router_init_std=0.02, proj_std=0.02)
