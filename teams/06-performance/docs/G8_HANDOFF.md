@@ -117,12 +117,15 @@ The reason is `null` when the metric is present.
 
 | Evidence | Result | Meaning |
 |---|---|---|
-| G6 final run, Colab A100-SXM4-40GB, commit `f1ed7f2` ([gist](https://gist.github.com/vaibh27/574990425455e4a9cb64822f14e3d85b)) | `pytest --all-configs`: 375 passed, 1 xfailed, 0 skipped. Normal and MTP pairs at 100 steps: PASS, 28 of 28 gated parts each; layer-recorder overhead 0.41% / 0.25%; 1 host sync per step | The refreshed baseline; run JSONs, JSONL and logs in the gist |
-| Raj, Colab A100-SXM4-40GB, same commit | 227 passed, 12 of 12 pairs; normal pair PASS 28 of 28 (`data` by the 0.05 ms rule); MTP pair PASS at 50 steps (below the 100-step minimum) | A second session and user agree |
-| Sunil, A/B on Modal A100-40GB, four alternating runs per version ([PR #30 comment](https://github.com/vaibh27/era-v5-lab/pull/30#issuecomment-6522615585), [gist](https://gist.github.com/jssunil/43a985d359683773d98a024df501bc12)) | Median 82.60 ms without telemetry, 79.75 ms with; 0 timing events created during steps in 8 runs; 100 `step_timing` and 9 `gpu_sample` records per run, `raw_step_ms` matching the JSON | No telemetry overhead above about 5% (the test's resolution); live records consistent with the summary |
-| Sunil, RTX 5070 Ti (Windows), commit `f1ed7f2`, four runs ([gist](https://gist.github.com/jssunil/a8180d70598e5a62d7534d252b5cdc08)) | Every code part passes in all six pairs; only checkpoint save fails (7.7 to 9.5%, in the pairs with the run whose disk write was slower) | Repeatability off Colab is a week-2 item (`results/repeat_check_v1.md`) |
-| Sunil, earlier A100 / H100 / 5070 Ti review ([PR #29 comment](https://github.com/vaibh27/era-v5-lab/pull/29#issuecomment-6520549948)) | Some pairs failed the 5% / 0.05 ms rule on earlier commits | Same week-2 item |
-| H200 validation in upstream [PR #135](https://github.com/theschoolofai/era-v5-lab/pull/135) (closed without merge) | 274 passed, 1 xfailed; 22 of 22 CUDA timer tests; 2x H200 NCCL run; 24 of 33 gated parts failed the repeat check, 433 host syncs per step | An earlier `lab_small` configuration (MoE loop dispatch); the current model has 1 host sync per step |
+| Baseline, Colab A100-SXM4-40GB, commit `f1ed7f2` ([gist](https://gist.github.com/vaibh27/574990425455e4a9cb64822f14e3d85b)) | `pytest --all-configs`: 375 passed, 1 xfailed, 0 skipped. Normal and MTP pairs at 100 steps: PASS, 28 of 28 gated parts each; layer-recorder overhead 0.41% / 0.25%; 1 host sync per step | The baseline; run JSONs, JSONL and logs in the gist |
+| RTX 5070 Ti (Linux), commit `190693a` (same code as `f1ed7f2`, docstrings only), four runs per mode ([runs](https://gist.github.com/jssunil/0f0e289c5dca5630214d1de1da109ba9), [tests](https://gist.github.com/jssunil/0be0592d4464997a3d216fdee59fe09e)) | All six normal and all six MTP pairs pass, checkpoint save included; step 59.6 ms normal, 104.4 ms MTP; MFU / HFU `null` with `unknown_gpu`; `--all-configs` 375 passed, 1 xfailed, 0 skipped | A second GPU and host agree |
+
+Other runs:
+- [Telemetry A/B, Modal A100-40GB](https://github.com/vaibh27/era-v5-lab/pull/30#issuecomment-6522615585)
+- [RTX 5070 Ti, Windows](https://gist.github.com/jssunil/a8180d70598e5a62d7534d252b5cdc08)
+- [Earlier A100 / H100 / 5070 Ti review](https://github.com/vaibh27/era-v5-lab/pull/29#issuecomment-6520549948)
+- [H200, earlier `lab_small` configuration](https://github.com/theschoolofai/era-v5-lab/pull/135)
+- Second Colab session, same commit: `results/baseline_v0.md`, Other machines
 
 ## 6. Open: G8 to confirm
 

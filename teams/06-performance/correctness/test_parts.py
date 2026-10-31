@@ -200,8 +200,12 @@ def test_sampler_end_to_end_with_a_fake_nvidia_smi(tmp_path, monkeypatch):
     smi.chmod(0o755)
     monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
     records = []
-    with M.GpuSampler(torch.device("cuda"), interval_ms=20,
-                      on_sample=lambda row, step: records.append((row, step))) as s:
+    sampler = M.GpuSampler(torch.device("cuda"), interval_ms=20,
+                           on_sample=lambda row, step: records.append((row, step)))
+    # Target the fake GPU 0, not the host's real PCI address (a host GPU at 02:00.0 matched the fake GPU 1).
+    sampler.target_index = 0
+    sampler.target_pci_bus_id = "00000000:01:00.0"
+    with sampler as s:
         s.set_step(7)
         time.sleep(0.5)
     out = s.summary()
