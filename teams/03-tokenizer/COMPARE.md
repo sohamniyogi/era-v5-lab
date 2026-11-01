@@ -254,6 +254,9 @@ Each candidate adds one change to the one before it. All are trained on the v1 c
 
 All builds use `train_bpe.py --special-layout v0 --v0-tokenizer <v0.1 tokenizer.json>` (C0: the v0 file).
 
+- **Built twice:** each of C1, C2 and C3 was built a second time from the same inputs (`corpus60`, v0.1 specials, the flags above). Both builds give the same sha256: C1 `5d386e2e…`, C2 `84204d78…`, C3 `54f20825…` (`rebuild_sha256` in each manifest).
+- **Corpus:** C1–C3 are trained on the v1 corpus (FineWeb-2, `corpus60`), not on a Data A/B sample. The Data A tokenizer sample (Thu 12 Nov) means one retrain of the best candidate on that sample; its sha256 will differ from the ones here.
+
 | Tokenizer | En | Code | Hi | Bn | Ta | Te | Kn | Ml | Mr | Gu | Pa | Or | As | Mean |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | BrahmicTokenizer-131K | 1.2907 | 0.2456 | 1.5834 | 2.2785 | 3.0526 | 2.9790 | 3.0159 | 3.3596 | 2.5032 | 2.1481 | 2.4996 | 3.8723 | 2.6430 | 2.7214 |
