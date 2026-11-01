@@ -17,7 +17,7 @@ Id layout (from slots.json)
     [vocab - special_slots, vocab)  special tokens: named ones, then <|reserved_N|>
 
 With --special-layout v0 the special ids are tokenizer v0's instead (#107):
-all 356 special entries are copied verbatim from the v0 tokenizer.json, at
+all 356 special entries are copied verbatim from the v0 (or v0.1, #132) tokenizer.json, at
 their exact ids (including the 9 outside the top block, e.g. 36 and 128512).
 Normal tokens then fill the remaining 130,716 ids in order, skipping those
 ids, so a script block may contain a special id; the manifest lists them.
@@ -65,6 +65,12 @@ Usage
         --special-layout v0 --v0-tokenizer /path/to/v0_tokenizer.json --normalizer v1 \\
         --brahmic-dir /path/to/BrahmicTokenizer-131K
     python check_ids.py /path/to/v1/tokenizer.json /path/to/out/tokenizer.json
+
+    # Week-2 candidates (C1 -> C2 -> C3 each add one change; v0.1 specials from v0/build_v0_1.py)
+    python train_bpe.py ... --slots slots_c1.json --special-layout v0 --v0-tokenizer v0_1_tokenizer.json   # C1: o200k swap only
+    python train_bpe.py ... --slots slots_v2.json --special-layout v0 --v0-tokenizer v0_1_tokenizer.json   # C2: + slots_v1
+    python train_bpe.py ... --slots slots_v2.json --special-layout v0 --v0-tokenizer v0_1_tokenizer.json \\
+        --normalizer v1                                                                                    # C3: + normalizer (v2)
 
 Writes <out>/tokenizer.json and <out>/manifest.json (sha256, slot table,
 corpus hashes, verify results). Exit 1 if a verify script fails.
@@ -386,16 +392,19 @@ def run_verify(brahmic_dir, tok_path, compare_to):
 
 
 def load_v0_specials(path):
-    """Tokenizer v0's added_tokens, after checking the file against v0/SHA256SUMS (#107)."""
+    """Tokenizer v0's or v0.1's added_tokens, after checking the file against v0/SHA256SUMS (#107, #132)."""
     sha = sha256_file(path)
     sums = Path(__file__).resolve().parent.parent / "v0" / "SHA256SUMS"
-    want = [ln.split()[0] for ln in sums.read_text().splitlines() if ln.endswith("v0/tokenizer.json")] if sums.exists() else []
+    want = {ln.split()[1].split("/")[0]: ln.split()[0] for ln in sums.read_text().splitlines()
+            if ln.endswith(("v0/tokenizer.json", "v0.1/tokenizer.json"))} if sums.exists() else {}
     if not want:
         sys.exit(f"ERROR: no v0/tokenizer.json line in {sums}; cannot check the v0 file.")
-    if sha != want[0]:
-        sys.exit(f"ERROR: {path} sha256 {sha} is not tokenizer v0 ({want[0]}). Build it with v0/build_v0.py.")
+    version = next((v for v, s in want.items() if s == sha), None)
+    if version is None:
+        sys.exit(f"ERROR: {path} sha256 {sha} is not tokenizer v0 or v0.1 ({want}). "
+                 "Build it with v0/build_v0.py (then v0/build_v0_1.py).")
     t = json.loads(Path(path).read_text(encoding="utf-8"))
-    return t["added_tokens"], sha
+    return t["added_tokens"], sha, version
 
 
 def main():
@@ -427,7 +436,7 @@ def main():
     if args.special_layout == "v0":
         if not args.v0_tokenizer:
             sys.exit("ERROR: --special-layout v0 needs --v0-tokenizer.")
-        specials, v0_sha = load_v0_specials(args.v0_tokenizer)
+        specials, v0_sha, v0_version = load_v0_specials(args.v0_tokenizer)
         n_special = len(specials)
     else:
         names = cfg["named_specials"] + [f"<|reserved_{i}|>" for i in range(n_special - len(cfg["named_specials"]))]
@@ -539,7 +548,8 @@ def main():
         "special_layout": args.special_layout,
         **({"special_tokens": names[:len(cfg["named_specials"])],
             "reserved_special_slots": n_special - len(cfg["named_specials"])}
-           if args.special_layout == "own" else {"v0_tokenizer_sha256": v0_sha, "special_tokens": n_special}),
+           if args.special_layout == "own" else {"v0_tokenizer": v0_version, "v0_tokenizer_sha256": v0_sha,
+                                                          "special_tokens": n_special}),
         "base": {"source": "tiktoken o200k_base", "kept": base_size, "dropped": dropped},
         **({"o200k_swap": swap} if swap else {}),
         "corpus": {lang: corpus_manifest.get(lang) for spec in scripts.values() for lang in spec["langs"]},
